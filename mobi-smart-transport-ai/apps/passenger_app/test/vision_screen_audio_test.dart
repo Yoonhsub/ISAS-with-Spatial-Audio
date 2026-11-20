@@ -19,11 +19,13 @@ import 'vision_observation_tts_test.dart' as speech;
 
 class _HeadPort implements HeadTrackedCuePort {
   final calls = <String>[];
+  final argsHistory = <Map<String, dynamic>>[];
   @override
   Future<Map<String, dynamic>> invoke(
       String method, Map<String, dynamic> args) async {
     calls.add(method);
-    return method == 'start'
+    argsHistory.add(Map<String, dynamic>.from(args));
+    return (method == 'start' || method == 'update')
         ? {'running': true, 'spatial': true}
         : {'confirmed': true, 'running': false};
   }
@@ -1343,6 +1345,77 @@ void main() {
     a.dispose();
     await engine.dispose();
     priority.dispose();
+    expect(t.takeException(), isNull);
+  });
+
+  testWidgets(
+      'continuousBeaconTone streams 700Hz target at RSSI pace and seamlessly adds spatial azimuth when door locks',
+      (t) async {
+    final port = native.Port(), headPort = _HeadPort(), tts = speech.FakeTts();
+    final engine = SpatialVerificationEngine(
+        NativeDirectionalCueOutput(port: port, headTrackedPort: headPort), tts);
+    final priority = SpeechPriorityCoordinator(engine);
+    final sensor = HeadTrackingState();
+    var now = 0;
+    final a = VisionScreenAudio(
+        priority: priority,
+        engine: engine,
+        sessionGeneration: 's',
+        isCurrent: () => true,
+        headTracking: sensor,
+        horizontalFovDegrees: 70,
+        confirmationFrames: 1,
+        requireDoorInBus: false,
+        continuousBeaconTone: true,
+        ccwPositiveYaw: true,
+        initialBeaconRssi: -85,
+        nowMicros: () => now);
+    sensor.publish(HeadTrackingSnapshot(
+        status: HeadTrackingStatus.ready,
+        rawYaw: 30,
+        filteredYaw: 30,
+        referenceYaw: 0,
+        receivedAt: DateTime.now().toUtc()));
+    a.setHeadTrackingMount(HeadTrackingCameraMount.headMountedCamera);
+    a.setMountAlignment(verified: true, cameraAxisOffsetDegrees: 0);
+    a.setEnabled(true);
+    a.setHeadTrackingEnabled(true);
+    await flush(t);
+
+    // 1. Before door detection: starts continuous target stream at center (0 deg) & 1400ms interval.
+    expect(headPort.calls, ['start']);
+    expect(headPort.argsHistory.last['pattern'], 'target');
+    expect(headPort.argsHistory.last['intervalMs'], 1400);
+    expect(headPort.argsHistory.last['azimuthDegrees'], 0.0);
+
+    // 2. RSSI improves to -45 dBm before door lock -> updates interval seamlessly to 220ms without stopping.
+    a.updateBeaconRssi(-45);
+    await flush(t);
+    expect(headPort.calls, ['start', 'update']);
+    expect(headPort.argsHistory.last['pattern'], 'target');
+    expect(headPort.argsHistory.last['intervalMs'], 220);
+    expect(headPort.argsHistory.last['azimuthDegrees'], 0.0);
+
+    // 3. Detect bus_door off-center -> locks anchor and updates azimuth seamlessly without cut-off.
+    a.observe(
+        detection(now, boxes: const [
+          LocalBox('bus_door', .92, .7, .2, .2, .4),
+        ]).toDetectionResult(),
+        age: Duration.zero);
+    await flush(t);
+    expect(a.doorAnchorLocked, isTrue);
+    expect(headPort.calls.where((c) => c == 'stop'), isEmpty);
+    expect(headPort.argsHistory.last['pattern'], 'target');
+    expect(headPort.argsHistory.last['intervalMs'], 220);
+    expect(headPort.argsHistory.last['azimuthDegrees'] as double, greaterThan(15.0));
+
+    // 4. Clean stop cancels timer and stops native tone engine.
+    await a.stop();
+    await flush(t);
+    expect(headPort.calls.last, 'stop');
+    a.dispose();
+    priority.dispose();
+    await engine.dispose();
     expect(t.takeException(), isNull);
   });
 }

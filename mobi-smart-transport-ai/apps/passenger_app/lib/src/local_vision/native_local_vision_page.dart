@@ -156,6 +156,7 @@ class _LocalVisionPageState extends State<LocalVisionPage>
           requireDoorInBus: false,
           prioritizeByDistance: true,
           ccwPositiveYaw: true,
+          continuousBeaconTone: true,
           initialBeaconRssi: widget.targetBeaconRssi,
           isCurrent: () =>
               mounted &&

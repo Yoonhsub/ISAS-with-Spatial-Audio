@@ -26,6 +26,7 @@ class VisionScreenAudio extends ChangeNotifier {
     this.sceneMode = false,
     this.pingOnly = false,
     this.ccwPositiveYaw = false,
+    this.continuousBeaconTone = false,
     int? initialBeaconRssi,
   })  : headTracking = headTracking ?? sharedHeadTrackingState,
         horizontalFovDegrees = horizontalFovDegrees ?? _configuredFov,
@@ -58,9 +59,10 @@ class VisionScreenAudio extends ChangeNotifier {
   final int confirmationFrames;
   final bool requireDoorInBus;
   final bool prioritizeByDistance;
-  final bool sceneMode, pingOnly, ccwPositiveYaw;
+  final bool sceneMode, pingOnly, ccwPositiveYaw, continuousBeaconTone;
   late final VisionSceneSummaryTracker _sceneTracker;
   Timer? _sceneTimer;
+  Timer? _beaconToneTimer;
   DateTime? lastSceneReceivedAt;
   Map<String, Object?> sceneOutputDiagnostic = const {};
   String? _sceneMeaning;
@@ -90,6 +92,7 @@ class VisionScreenAudio extends ChangeNotifier {
   void updateBeaconRssi(int? rssi) {
     if (_targetBeaconRssi == rssi) return;
     _targetBeaconRssi = rssi;
+    _syncContinuousBeaconTone();
     if (!_disposed) {
       _notify();
     }
@@ -346,7 +349,51 @@ class VisionScreenAudio extends ChangeNotifier {
     _streakMeaning = null;
     _streakCount = 0;
     status = '화면 기준 음향 시연 ON · 새 검출 대기';
+    if (continuousBeaconTone) {
+      _beaconToneTimer?.cancel();
+      _beaconToneTimer = Timer.periodic(
+        const Duration(milliseconds: 150),
+        (_) => _syncContinuousBeaconTone(),
+      );
+      _syncContinuousBeaconTone();
+    }
     _notify();
+  }
+
+  void _syncContinuousBeaconTone() {
+    if (!continuousBeaconTone) return;
+    final output = engine.output;
+    if (output is! ContinuousBeaconTargetOutput) return;
+    final continuous = output as ContinuousBeaconTargetOutput;
+    if (_disposed ||
+        !enabled ||
+        !isCurrent() ||
+        _targetBeaconRssi == null ||
+        priority.priorityActive ||
+        (busy && !_activeHeadTracked)) {
+      unawaited(continuous.stopBeaconTargetStream());
+      return;
+    }
+    final intervalMs = beaconToneIntervalMs(_targetBeaconRssi!);
+    var azimuthDegrees = 0.0;
+    if (_doorAnchorLocked && headTrackingEnabled && canActivateHeadTracking) {
+      final lockedAngle = lockedTargetAzimuthForHead(
+        sensor: headTracking.snapshot,
+        now: DateTime.now().toUtc(),
+        ccwPositiveYaw: ccwPositiveYaw,
+      );
+      if (lockedAngle != null) {
+        azimuthDegrees = lockedAngle;
+      } else {
+        _invalidateHeadTracking('장착·센서 조건 무효');
+      }
+    }
+    unawaited(
+      continuous.syncBeaconTargetStream(
+        intervalMs: intervalMs,
+        azimuthDegrees: azimuthDegrees,
+      ),
+    );
   }
 
   void _priorityChanged() {
@@ -355,8 +402,11 @@ class VisionScreenAudio extends ChangeNotifier {
       status = priority.outputUncertain
           ? '오디오 종료 미확인 · 새 재생 차단'
           : 'Live Hold / 기존 안내 우선 · 이전 요청 폐기';
+      _syncContinuousBeaconTone();
       unawaited(_stopOwned());
       _notify();
+    } else if (!priority.priorityActive && !_disposed) {
+      _syncContinuousBeaconTone();
     }
   }
 
@@ -366,6 +416,7 @@ class VisionScreenAudio extends ChangeNotifier {
         !headTracking.snapshot.usable(DateTime.now().toUtc())) {
       _invalidateHeadTracking('센서 연결 또는 최신 보정 yaw 무효');
     }
+    _syncContinuousBeaconTone();
     _notify();
   }
 
@@ -461,10 +512,13 @@ class VisionScreenAudio extends ChangeNotifier {
 
   Future<void> stop({bool notify = true}) {
     _sceneTimer?.cancel();
+    _beaconToneTimer?.cancel();
+    _beaconToneTimer = null;
     _sceneTracker.invalidate(reason: 'stopped');
     _sceneMeaning = null;
     enabled = false;
     _doorAnchorLocked = false;
+    _syncContinuousBeaconTone();
     _revision++;
     _streakMeaning = null;
     _streakCount = 0;
@@ -641,6 +695,7 @@ class VisionScreenAudio extends ChangeNotifier {
         );
         if (lockedReferenceYaw != null) {
           _doorAnchorLocked = true;
+          _syncContinuousBeaconTone();
         }
       }
       correctedAngle = headTrackedAngleForMount(
@@ -655,6 +710,41 @@ class VisionScreenAudio extends ChangeNotifier {
       }
     } else if (headTrackingEnabled) {
       _invalidateHeadTracking('장착·센서 조건 무효');
+    }
+    if (continuousBeaconTone &&
+        _targetBeaconRssi != null &&
+        engine.output is ContinuousBeaconTargetOutput &&
+        selected['classId'] == 'bus_door' &&
+        correctedAngle != null) {
+      diagnostic = {
+        'frameId': result['frameId'],
+        'capturedAt': result['capturedAt'],
+        'classId': selected['classId'],
+        'className': selected['className'],
+        'confidence': best,
+        'bbox': Map<String, Object?>.from(box),
+        'screenCenterX': cx,
+        'screenDirection': side.name.toUpperCase(),
+        'doorAnchorTracking': _doorAnchorLocked,
+        'headTrackingStatus': headTracking.snapshot.status.name,
+        'headTrackingEnabled': true,
+        'headTrackingMount': mountCalibration.mount.name,
+        'axesAlignmentVerified': mountCalibration.axesAlignmentVerified,
+        if (cameraAngle != null) 'cameraAngleDegrees': cameraAngle,
+        'correctedAngleDegrees': correctedAngle,
+        if (lockedReferenceYaw != null)
+          'lockedReferenceYawDegrees': lockedReferenceYaw,
+        'targetBeaconRssi': _targetBeaconRssi,
+        'anchorPingIntervalMs': beaconToneIntervalMs(_targetBeaconRssi!),
+        'coordinateFrame': 'upright-mirrored-camera-image',
+        'provenance': DirectionalGuidance.screenProvenance,
+        'guidanceEligible': false,
+        'text': text,
+      };
+      status = '버스 문 포착 · 비컨 입체 유도 전환';
+      _syncContinuousBeaconTone();
+      _notify();
+      return;
     }
     final guidance = DirectionalGuidance(
       guidanceId: result['frameId'] as String,
@@ -763,16 +853,44 @@ class VisionScreenAudio extends ChangeNotifier {
     final pingIntervalMs = _targetBeaconRssi != null
         ? beaconToneIntervalMs(_targetBeaconRssi!)
         : 1200;
-    final anchorPingInterval = Duration(milliseconds: pingIntervalMs);
-    if (_lastStarted != null &&
-        _now() - _lastStarted! < anchorPingInterval.inMicroseconds) {
-      return;
-    }
     final side = correctedAngle < -15
         ? TestDirection.left
         : correctedAngle > 15
             ? TestDirection.right
             : TestDirection.center;
+    if (continuousBeaconTone &&
+        _targetBeaconRssi != null &&
+        engine.output is ContinuousBeaconTargetOutput) {
+      diagnostic = {
+        'frameId': result['frameId'],
+        'capturedAt': result['capturedAt'],
+        'classId': 'bus_door',
+        'className': '버스 문 (기준점 고정)',
+        'doorAnchorTracking': true,
+        'screenDirection': side.name.toUpperCase(),
+        'headTrackingStatus': headTracking.snapshot.status.name,
+        'headTrackingEnabled': true,
+        'headTrackingMount': mountCalibration.mount.name,
+        'axesAlignmentVerified': mountCalibration.axesAlignmentVerified,
+        'correctedAngleDegrees': correctedAngle,
+        'lockedReferenceYawDegrees': headTracking.snapshot.referenceYaw,
+        'targetBeaconRssi': _targetBeaconRssi,
+        'anchorPingIntervalMs': pingIntervalMs,
+        'coordinateFrame': 'world-door-anchor',
+        'provenance': DirectionalGuidance.screenProvenance,
+        'guidanceEligible': false,
+        'text': '고정된 버스 문 기준 방향 안내입니다.',
+      };
+      status = '고정된 문 기준점 비컨 입체 유도 중';
+      _syncContinuousBeaconTone();
+      _notify();
+      return;
+    }
+    final anchorPingInterval = Duration(milliseconds: pingIntervalMs);
+    if (_lastStarted != null &&
+        _now() - _lastStarted! < anchorPingInterval.inMicroseconds) {
+      return;
+    }
     final meaning = 'bus_door_anchor:${side.name}';
     final revision = _revision;
     bool valid() =>
@@ -1146,9 +1264,12 @@ class VisionScreenAudio extends ChangeNotifier {
     if (_disposed) return;
     _disposed = true;
     _sceneTimer?.cancel();
+    _beaconToneTimer?.cancel();
+    _beaconToneTimer = null;
     _sceneTracker.clear();
     enabled = false;
     _doorAnchorLocked = false;
+    _syncContinuousBeaconTone();
     _revision++;
     priority.removeListener(_priorityChanged);
     headTracking.removeListener(_headTrackingChanged);

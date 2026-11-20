@@ -58,6 +58,7 @@ class NativeDirectionalCueOutput
         SpatialTestOutput,
         DirectionalCueOutput,
         HeadTrackedCueOutput,
+        ContinuousBeaconTargetOutput,
         InformationalDirectionalCueOutput {
   NativeDirectionalCueOutput(
       {NativeCuePort? port, HeadTrackedCuePort? headTrackedPort})
@@ -76,7 +77,11 @@ class NativeDirectionalCueOutput
   bool _closed = false,
       _ready = false,
       _uncertain = false,
-      _headTrackedActive = false;
+      _headTrackedActive = false,
+      _beaconStreamActive = false,
+      _beaconSyncInFlight = false;
+  int? _pendingBeaconIntervalMs;
+  double? _pendingBeaconAzimuthDegrees;
   Completer<bool>? _playing;
   Future<void>? _stopBarrier, _disposing;
   Map<String, dynamic> _probe = {
@@ -200,7 +205,7 @@ class NativeDirectionalCueOutput
         'sensorAgeMs': 0,
         'intervalMs': 1000,
         'beaconAgeMs': -1,
-        'pattern': 'warning',
+        'pattern': 'target',
         'azimuthDegrees': azimuthDegrees,
       });
       if (_closed || id != _id || !identical(_playing, pending)) {
@@ -239,6 +244,83 @@ class NativeDirectionalCueOutput
       Error.throwWithStackTrace(error, stack);
     }
     return pending.future;
+  }
+
+  @override
+  Future<void> syncBeaconTargetStream({
+    required int intervalMs,
+    required double azimuthDegrees,
+  }) async {
+    if (_closed || _disposing != null) return;
+    if (!azimuthDegrees.isFinite) return;
+    if (_beaconSyncInFlight) {
+      _pendingBeaconIntervalMs = intervalMs;
+      _pendingBeaconAzimuthDegrees = azimuthDegrees;
+      return;
+    }
+    _beaconSyncInFlight = true;
+    try {
+      final clampedInterval = intervalMs.clamp(220, 1400);
+      final clampedAzimuth = azimuthDegrees.clamp(-180.0, 180.0);
+      final method = _beaconStreamActive ? 'update' : 'start';
+      final data = await _headTrackedPort.invoke(method, {
+        'left': .7071067811865476,
+        'right': .7071067811865476,
+        'sensorAgeMs': 0,
+        'intervalMs': clampedInterval,
+        'beaconAgeMs': -1,
+        'pattern': 'target',
+        'azimuthDegrees': clampedAzimuth,
+      });
+      if (_closed) return;
+      final running = data['running'] == true;
+      _beaconStreamActive = running;
+      _headTrackedActive = running;
+      _probe = {
+        ..._probe,
+        ...data,
+        'phase': running ? 'playing' : 'stopped',
+        'active': running,
+        'direction': 'BEACON_TARGET',
+        'intervalMs': clampedInterval,
+        'azimuthDegrees': clampedAzimuth,
+      };
+    } catch (error) {
+      _beaconStreamActive = false;
+      _headTrackedActive = false;
+      debugPrint('Continuous beacon target cue failed: ${error.runtimeType}');
+    } finally {
+      _beaconSyncInFlight = false;
+      final nextInterval = _pendingBeaconIntervalMs;
+      final nextAzimuth = _pendingBeaconAzimuthDegrees;
+      _pendingBeaconIntervalMs = null;
+      _pendingBeaconAzimuthDegrees = null;
+      if (nextInterval != null &&
+          nextAzimuth != null &&
+          !_closed &&
+          _disposing == null) {
+        unawaited(
+          syncBeaconTargetStream(
+            intervalMs: nextInterval,
+            azimuthDegrees: nextAzimuth,
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Future<void> stopBeaconTargetStream() async {
+    _pendingBeaconIntervalMs = null;
+    _pendingBeaconAzimuthDegrees = null;
+    if (!_beaconStreamActive && !_headTrackedActive) return;
+    _beaconStreamActive = false;
+    _headTrackedActive = false;
+    try {
+      await _headTrackedPort.invoke('stop', const {});
+    } catch (error) {
+      debugPrint('Stop continuous beacon target failed: ${error.runtimeType}');
+    }
   }
 
   void _event(Map<String, dynamic> data) {
@@ -283,6 +365,7 @@ class NativeDirectionalCueOutput
         throw StateError('Native stop not confirmed');
       }
       _headTrackedActive = false;
+      _beaconStreamActive = false;
       _uncertain = false;
       if (!_closed) {
         _probe = {..._probe, ...data, 'phase': 'stopped', 'active': false};
@@ -312,6 +395,7 @@ class NativeDirectionalCueOutput
           throw StateError('HRTF dispose stop not confirmed');
         }
         _headTrackedActive = false;
+        _beaconStreamActive = false;
       }
       final data = await _port.invoke('dispose', _args());
       if (data['confirmed'] != true) {

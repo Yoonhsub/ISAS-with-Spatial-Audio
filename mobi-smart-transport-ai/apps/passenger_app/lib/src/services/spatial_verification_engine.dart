@@ -28,6 +28,15 @@ abstract interface class HeadTrackedCueOutput {
   Future<bool> playHeadTrackedCue(double azimuthDegrees);
 }
 
+abstract interface class ContinuousBeaconTargetOutput {
+  Future<void> syncBeaconTargetStream({
+    required int intervalMs,
+    required double azimuthDegrees,
+  });
+
+  Future<void> stopBeaconTargetStream();
+}
+
 class _GuidanceRequest {
   _GuidanceRequest(this.guidance, this.isCurrent, this.admit, this.phase,
       this.spokenText, this.cueOnly, this.informationalTone);

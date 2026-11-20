@@ -8,6 +8,7 @@ import android.os.Process
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.sin
 
 /** Bus diagnostic pan and measured binaural obstacle warning. No system-volume changes. */
@@ -51,8 +52,8 @@ class ToneTestEngine(context: Context) {
     )
 
     private fun validate(l: Double, r: Double, age: Int, interval: Int, beaconAge: Int, patternName: String, azimuth: Double?) {
-        require(azimuth == null || (azimuth.isFinite() && azimuth in -180.0..180.0 && patternName == "warning"))
-        require(azimuth == null || interval >= 250)
+        require(azimuth == null || (azimuth.isFinite() && azimuth in -180.0..180.0))
+        require(azimuth == null || patternName != "warning" || interval >= 250)
         require(patternName == "target" || patternName == "warning") { "잘못된 소리 패턴" }
         require(l.isFinite() && r.isFinite() && l in 0.0..1.0 && r in 0.0..1.0)
         require(age in 0..999) { "새 센서 각도를 수신한 뒤 시작해주세요." }
@@ -63,7 +64,7 @@ class ToneTestEngine(context: Context) {
     fun start(l: Double, r: Double, age: Int, interval: Int, beaconAge: Int, patternName: String, azimuth: Double? = null): Map<String, Any> {
         stop("새 테스트 준비")
         validate(l, r, age, interval, beaconAge, patternName, azimuth)
-        if (azimuth != null) warningBank // Fail before acquiring focus if data is missing.
+        if (azimuth != null && patternName == "warning") warningBank // Fail before acquiring focus if data is missing.
         val outputs = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { isHeadphone(it) }
         val output = outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
             ?: outputs.firstOrNull()
@@ -121,29 +122,47 @@ class ToneTestEngine(context: Context) {
             var frame = 0L
             var pulseStart = 0L
             var previous = renderState
-            var spatial = previous.azimuth?.let { SpatialWarningRenderer(warningBank, it) }
+            var spatial = if (previous.pattern == "warning") previous.azimuth?.let { SpatialWarningRenderer(warningBank, it) } else null
+            fun targetPulseSample(p: Double): Double {
+                if (p < 0.0 || p >= targetPulseFrames) return 0.0
+                val env = minOf(1.0, p / 480.0, (targetPulseFrames - 1 - p) / 480.0)
+                return sin(2.0 * PI * 700.0 * p / rate) * env * 0.12 * Short.MAX_VALUE
+            }
             try {
                 while (workerGeneration.get() == generation) {
                     val current = renderState
                     if (previous.pattern != current.pattern || (previous.azimuth == null) != (current.azimuth == null)) {
                         pulseStart = frame
-                        spatial = current.azimuth?.let { SpatialWarningRenderer(warningBank, it) }
+                        spatial = if (current.pattern == "warning") current.azimuth?.let { SpatialWarningRenderer(warningBank, it) } else null
                     }
                     previous = current
+                    val targetAzimuth = if (current.pattern == "target") current.azimuth else null
+                    val sinA = if (targetAzimuth != null) sin(Math.toRadians(targetAzimuth)) else 0.0
+                    val itdSamples = sinA * 0.00066 * rate
+                    val lDelay = if (itdSamples > 0.0) itdSamples else 0.0
+                    val rDelay = if (itdSamples < 0.0) -itdSamples else 0.0
+                    val panTheta = (sinA.coerceIn(-1.0, 1.0) + 1.0) * (PI / 4.0)
+                    val lGain = cos(panTheta)
+                    val rGain = sin(panTheta)
                     for (i in 0 until chunkFrames) {
                         if (frame - pulseStart >= current.intervalMs.toLong() * rate / 1000) pulseStart = frame
                         val phase = (frame - pulseStart).toInt()
                         val warning = current.pattern == "warning"
-                        val pulseFrames = if (warning) warningPulseFrames else targetPulseFrames
-                        val localPhase = if (warning && phase >= warningSecondStart) phase - warningSecondStart else phase
-                        val sample = if (localPhase in 0 until pulseFrames) {
-                            val envelope = minOf(1.0, localPhase / 480.0, (pulseFrames - 1 - localPhase) / 480.0)
-                            val frequency = if (warning) 1100 else 700
-                            (sin(2 * PI * frequency * localPhase / rate) * envelope * 0.12 * Short.MAX_VALUE).toInt().toShort()
-                        } else 0.toShort()
-                        if (current.azimuth != null && spatial != null) {
+                        if (warning && current.azimuth != null && spatial != null) {
                             spatial.render(phase, current.azimuth, pcm, i * 2)
+                        } else if (!warning && targetAzimuth != null) {
+                            pcm[i * 2] = (targetPulseSample(phase - lDelay) * lGain).toInt()
+                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                            pcm[i * 2 + 1] = (targetPulseSample(phase - rDelay) * rGain).toInt()
+                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                         } else {
+                            val pulseFrames = if (warning) warningPulseFrames else targetPulseFrames
+                            val localPhase = if (warning && phase >= warningSecondStart) phase - warningSecondStart else phase
+                            val sample = if (localPhase in 0 until pulseFrames) {
+                                val envelope = minOf(1.0, localPhase / 480.0, (pulseFrames - 1 - localPhase) / 480.0)
+                                val frequency = if (warning) 1100 else 700
+                                (sin(2 * PI * frequency * localPhase / rate) * envelope * 0.12 * Short.MAX_VALUE).toInt().toShort()
+                            } else 0.toShort()
                             pcm[i * 2] = sample
                             pcm[i * 2 + 1] = sample
                         }

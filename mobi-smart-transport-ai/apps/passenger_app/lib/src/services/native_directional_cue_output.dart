@@ -81,6 +81,7 @@ class NativeDirectionalCueOutput
       _beaconStreamActive = false,
       _beaconSyncInFlight = false;
   int? _pendingBeaconIntervalMs;
+  int _beaconEpoch = 0;
   double? _pendingBeaconAzimuthDegrees;
   Completer<bool>? _playing;
   Future<void>? _stopBarrier, _disposing;
@@ -152,6 +153,10 @@ class NativeDirectionalCueOutput
       'direction': direction.name
     };
     try {
+      if (_beaconStreamActive) {
+        await stopBeaconTargetStream();
+        if (_closed || id != _id) return pending.future;
+      }
       final data = await _port.invoke(
           'play',
           _args({
@@ -197,6 +202,10 @@ class NativeDirectionalCueOutput
       pending.future.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
     );
     try {
+      if (_beaconStreamActive) {
+        await stopBeaconTargetStream();
+        if (_closed || id != _id) return pending.future;
+      }
       // The native start might be underway before its reply reaches Dart.
       _headTrackedActive = true;
       final data = await _headTrackedPort.invoke('start', {
@@ -251,7 +260,8 @@ class NativeDirectionalCueOutput
     required int intervalMs,
     required double azimuthDegrees,
   }) async {
-    if (_closed || _disposing != null) return;
+    if (_closed || _disposing != null || _playing != null ||
+        _stopBarrier != null || _uncertain) return;
     if (!azimuthDegrees.isFinite) return;
     if (_beaconSyncInFlight) {
       _pendingBeaconIntervalMs = intervalMs;
@@ -259,10 +269,14 @@ class NativeDirectionalCueOutput
       return;
     }
     _beaconSyncInFlight = true;
+    final epoch = _beaconEpoch;
     try {
       final clampedInterval = intervalMs.clamp(220, 1400);
       final clampedAzimuth = azimuthDegrees.clamp(-180.0, 180.0);
       final method = _beaconStreamActive ? 'update' : 'start';
+      // Native playback may already exist before start replies.
+      _beaconStreamActive = true;
+      _headTrackedActive = true;
       final data = await _headTrackedPort.invoke(method, {
         'left': .7071067811865476,
         'right': .7071067811865476,
@@ -272,7 +286,7 @@ class NativeDirectionalCueOutput
         'pattern': 'target',
         'azimuthDegrees': clampedAzimuth,
       });
-      if (_closed) return;
+      if (_closed || epoch != _beaconEpoch) return;
       final running = data['running'] == true;
       _beaconStreamActive = running;
       _headTrackedActive = running;
@@ -286,6 +300,7 @@ class NativeDirectionalCueOutput
         'azimuthDegrees': clampedAzimuth,
       };
     } catch (error) {
+      if (epoch != _beaconEpoch) return;
       _beaconStreamActive = false;
       _headTrackedActive = false;
       debugPrint('Continuous beacon target cue failed: ${error.runtimeType}');
@@ -313,7 +328,8 @@ class NativeDirectionalCueOutput
   Future<void> stopBeaconTargetStream() async {
     _pendingBeaconIntervalMs = null;
     _pendingBeaconAzimuthDegrees = null;
-    if (!_beaconStreamActive && !_headTrackedActive) return;
+    if (!_beaconStreamActive) return;
+    _beaconEpoch++;
     _beaconStreamActive = false;
     _headTrackedActive = false;
     try {
@@ -345,6 +361,9 @@ class NativeDirectionalCueOutput
   }
 
   void _retire() {
+    _beaconEpoch++;
+    _pendingBeaconIntervalMs = null;
+    _pendingBeaconAzimuthDegrees = null;
     _id++;
     final pending = _playing;
     _playing = null;

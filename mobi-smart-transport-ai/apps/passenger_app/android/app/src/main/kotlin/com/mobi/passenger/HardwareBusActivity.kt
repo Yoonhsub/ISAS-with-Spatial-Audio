@@ -27,7 +27,8 @@ open class HardwareBusActivity : FlutterActivity() {
     }
     private fun state() = mapOf(
         "granted" to granted(),
-        "locationEnabled" to locationEnabled()
+        "locationEnabled" to locationEnabled(),
+        "cameraGranted" to (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     )
     private fun queryCameraHorizontalFov(cameraName: String?, lensDirection: String?): Map<String, Any?> {
         return try {
@@ -104,12 +105,14 @@ open class HardwareBusActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mobi.passenger/hardware-permissions").setMethodCallHandler { call, result ->
             when (call.method) {
                 "check" -> result.success(state())
-                "request" -> {
+                "request", "requestDoorDemo" -> {
+                    val required = if (call.method == "requestDoorDemo" && packageName.endsWith(".doordemo"))
+                        permissions() + Manifest.permission.CAMERA else permissions()
                     if (pending != null) result.error("BUSY", "Permission request in progress", null)
-                    else if (granted()) result.success(state())
+                    else if (required.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) result.success(state())
                     else {
                         pending = result
-                        requestPermissions(permissions().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }.toTypedArray(), 7001)
+                        requestPermissions(required.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }.toTypedArray(), 7001)
                     }
                 }
                 else -> result.notImplemented()

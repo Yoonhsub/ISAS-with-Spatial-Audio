@@ -1070,12 +1070,13 @@ void main() {
         confirmationFrames: 1,
         requireDoorInBus: false,
         nowMicros: () => now);
+    final frameReceivedAt = DateTime.now().toUtc();
     sensor.publish(HeadTrackingSnapshot(
         status: HeadTrackingStatus.ready,
         rawYaw: 30,
         filteredYaw: 30,
         referenceYaw: 0,
-        receivedAt: DateTime.now().toUtc()));
+        receivedAt: frameReceivedAt));
     a.setHeadTrackingMount(HeadTrackingCameraMount.headMountedCamera);
     a.setMountAlignment(verified: true, cameraAxisOffsetDegrees: 0);
     a.setEnabled(true);
@@ -1085,13 +1086,29 @@ void main() {
     a.observe(
         detection(now, boxes: const [
           LocalBox('bus_door', .92, .7, .2, .2, .4),
-        ]).toDetectionResult(),
+        ]).toDetectionResult()
+          ..['capturedAt'] = frameReceivedAt.toIso8601String(),
         age: Duration.zero);
     await flush(t);
 
     expect(sensor.snapshot.referenceYaw, closeTo(51.0, 1e-6));
     expect(a.diagnostic['lockedReferenceYawDegrees'], closeTo(51.0, 1e-6));
     expect(headPort.calls, contains('start'));
+
+    final nextFrame = DateTime.now().toUtc();
+    sensor.publish(HeadTrackingSnapshot(
+        status: HeadTrackingStatus.ready,
+        filteredYaw: 30,
+        referenceYaw: sensor.snapshot.referenceYaw,
+        receivedAt: nextFrame));
+    a.observe(
+        detection(++now, boxes: const [
+          LocalBox('bus_door', .92, .8, .2, .2, .4),
+        ]).toDetectionResult(),
+        receivedAt: nextFrame,
+        age: Duration.zero);
+    expect(sensor.snapshot.referenceYaw, closeTo(58, 1e-6));
+    expect(headPort.calls.where((call) => call == 'start'), hasLength(1));
 
     await a.stop();
     await t.pump(const Duration(milliseconds: 600));
@@ -1136,6 +1153,7 @@ void main() {
         detection(now, boxes: const [
           LocalBox('bus_door', .92, .7, .2, .2, .4),
         ]).toDetectionResult(),
+        receivedAt: sensor.snapshot.receivedAt,
         age: Duration.zero);
     await flush(t);
     expect(a.doorAnchorLocked, isTrue);
@@ -1209,6 +1227,7 @@ void main() {
         detection(now, boxes: const [
           LocalBox('bus_door', .92, .7, .2, .2, .4),
         ]).toDetectionResult(),
+        receivedAt: sensor.snapshot.receivedAt,
         age: Duration.zero);
     await flush(t);
     expect(a.doorAnchorLocked, isTrue);
@@ -1348,6 +1367,113 @@ void main() {
     expect(t.takeException(), isNull);
   });
 
+  testWidgets('beacon-free WT901 test preserves road zero as head turns toward and past door', (t) async {
+    final head = _HeadPort();
+    final engine = SpatialVerificationEngine(
+        NativeDirectionalCueOutput(port: native.Port(), headTrackedPort: head),
+        speech.FakeTts());
+    final priority = SpeechPriorityCoordinator(engine);
+    var now = 0;
+    final sensor = HeadTrackingState();
+    final capture = DateTime.now().toUtc();
+    void yaw(double degrees, int millis) => sensor.publish(HeadTrackingSnapshot(
+        status: HeadTrackingStatus.ready, rawYaw: degrees, filteredYaw: degrees,
+        referenceYaw: 40, receivedAt: capture.add(Duration(milliseconds: millis))));
+    final audio = VisionScreenAudio(
+        priority: priority, engine: engine, sessionGeneration: 'camera-only',
+        headTracking: sensor, ccwPositiveYaw: true,
+        isCurrent: () => true, doorDemo: true, directionOnly: true,
+        continuousBeaconTone: true, requireDoorInBus: false,
+        confirmationFrames: 1, horizontalFovDegrees: 70, nowMicros: () => now);
+    void frame(String label, double x) => audio.observe(
+        detection(++now, boxes: [LocalBox(label, .92, x, .2, .2, .4)])
+            .toDetectionResult(), receivedAt: capture, age: Duration.zero);
+    audio.setEnabled(true);
+    frame('bus_door', .7);
+    await flush(t);
+    expect(head.calls, isEmpty);
+    yaw(40, 0);
+    audio.setHeadTrackingMount(HeadTrackingCameraMount.headMountedCamera);
+    audio.setMountAlignment(verified: true, cameraAxisOffsetDegrees: 0);
+    audio.setHeadTrackingEnabled(true);
+    frame('bus_door', .7);
+    await flush(t);
+    expect(sensor.snapshot.referenceYaw, 40);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(21, .01));
+    frame('bus', .1);
+    for (final (heading, angle) in [(19.0, 0), (9.0, -10)]) {
+      yaw(heading, 0);
+      await flush(t);
+      expect(head.argsHistory.last['azimuthDegrees'], closeTo(angle, .01));
+      expect(head.argsHistory.last['intervalMs'], 600);
+    }
+    now += VisionScreenAudio.doorAnchorLifetime.inMicroseconds;
+    await t.pump(const Duration(milliseconds: 150));
+    await flush(t);
+    expect(head.calls.last, 'stop');
+    await audio.stop();
+    audio.dispose();
+    priority.dispose();
+    await engine.dispose();
+  });
+
+  testWidgets('door demo gates camera direction on target beacon reception', (t) async {
+    final head = _HeadPort();
+    final engine = SpatialVerificationEngine(
+        NativeDirectionalCueOutput(port: native.Port(), headTrackedPort: head),
+        speech.FakeTts());
+    final priority = SpeechPriorityCoordinator(engine);
+    var now = 0;
+    final audio = VisionScreenAudio(
+        priority: priority, engine: engine, sessionGeneration: 'demo',
+        isCurrent: () => true, continuousBeaconTone: true, doorDemo: true,
+        requireDoorInBus: false, confirmationFrames: 1, horizontalFovDegrees: 70,
+        nowMicros: () => now);
+    void observe(String label, {double x = .7}) {
+      audio.observe(detection(++now, boxes: [
+        LocalBox(label, .92, x, .2, .2, .4),
+      ]).toDetectionResult(), age: Duration.zero);
+    }
+    audio.setEnabled(true);
+    observe('bus_door');
+    await flush(t);
+    expect(head.calls, isEmpty);
+    audio.updateBeaconRssi(-85);
+    observe('bus');
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], 0);
+    audio.updateBeaconRssi(-45);
+    observe('bus_door');
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(21, .01));
+    expect(audio.demoPhase, contains('오른쪽'));
+    observe('bus_door', x: .4);
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(0, .01));
+    expect(audio.demoPhase, contains('가운데'));
+    observe('bus_door', x: .1);
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(-21, .01));
+    expect(audio.demoPhase, contains('왼쪽'));
+    expect(head.argsHistory.last['intervalMs'], 220);
+    expect(head.calls.where((c) => c == 'start'), hasLength(1));
+    now += const Duration(seconds: 1).inMicroseconds;
+    await t.pump(const Duration(milliseconds: 150));
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], 0);
+    audio.updateBeaconRssi(null);
+    observe('bus_door');
+    await flush(t);
+    expect(head.calls.last, 'stop');
+    audio.updateBeaconRssi(-85);
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], 0);
+    await audio.stop();
+    audio.dispose();
+    priority.dispose();
+    await engine.dispose();
+  });
+
   testWidgets(
       'continuousBeaconTone streams 700Hz target at RSSI pace and seamlessly adds spatial azimuth when door locks',
       (t) async {
@@ -1370,12 +1496,22 @@ void main() {
         ccwPositiveYaw: true,
         initialBeaconRssi: -85,
         nowMicros: () => now);
-    sensor.publish(HeadTrackingSnapshot(
-        status: HeadTrackingStatus.ready,
-        rawYaw: 30,
-        filteredYaw: 30,
-        referenceYaw: 0,
-        receivedAt: DateTime.now().toUtc()));
+    final latestAt = DateTime.now().toUtc();
+    final frameReceivedAt =
+        latestAt.subtract(const Duration(milliseconds: 400));
+    sensor
+      ..publish(HeadTrackingSnapshot(
+          status: HeadTrackingStatus.ready,
+          rawYaw: 30,
+          filteredYaw: 30,
+          referenceYaw: 0,
+          receivedAt: frameReceivedAt.subtract(const Duration(milliseconds: 20))))
+      ..publish(HeadTrackingSnapshot(
+          status: HeadTrackingStatus.ready,
+          rawYaw: 50,
+          filteredYaw: 50,
+          referenceYaw: 0,
+          receivedAt: latestAt));
     a.setHeadTrackingMount(HeadTrackingCameraMount.headMountedCamera);
     a.setMountAlignment(verified: true, cameraAxisOffsetDegrees: 0);
     a.setEnabled(true);
@@ -1396,18 +1532,42 @@ void main() {
     expect(headPort.argsHistory.last['intervalMs'], 220);
     expect(headPort.argsHistory.last['azimuthDegrees'], 0.0);
 
-    // 3. Detect bus_door off-center -> locks anchor and updates azimuth seamlessly without cut-off.
+    // The door is visible, but the frame has no nearby yaw sample.
     a.observe(
         detection(now, boxes: const [
           LocalBox('bus_door', .92, .7, .2, .2, .4),
         ]).toDetectionResult(),
-        age: Duration.zero);
+        receivedAt: frameReceivedAt.subtract(const Duration(milliseconds: 200)),
+        age: const Duration(milliseconds: 600));
+    await flush(t);
+    expect(a.doorAnchorLocked, isFalse);
+    expect(sensor.snapshot.referenceYaw, 0);
+    expect(headPort.argsHistory.last['azimuthDegrees'], 0.0);
+
+    // Use the yaw near frame receipt, then render using the newer yaw.
+    now++;
+    a.observe(
+        detection(now, boxes: const [
+          LocalBox('bus_door', .92, .7, .2, .2, .4),
+        ]).toDetectionResult(),
+        receivedAt: frameReceivedAt,
+        age: const Duration(milliseconds: 400));
     await flush(t);
     expect(a.doorAnchorLocked, isTrue);
+    expect(sensor.snapshot.referenceYaw, closeTo(9.0, 1e-6));
+    expect(sensor.snapshot.filteredYaw, 50);
+    expect(sensor.snapshot.receivedAt, latestAt);
     expect(headPort.calls.where((c) => c == 'stop'), isEmpty);
     expect(headPort.argsHistory.last['pattern'], 'target');
     expect(headPort.argsHistory.last['intervalMs'], 220);
-    expect(headPort.argsHistory.last['azimuthDegrees'] as double, greaterThan(15.0));
+    expect(headPort.argsHistory.last['azimuthDegrees'], closeTo(41.0, 1e-6));
+
+    now += VisionScreenAudio.doorAnchorLifetime.inMicroseconds;
+    await t.pump(const Duration(milliseconds: 150));
+    await flush(t);
+    expect(a.doorAnchorLocked, isFalse);
+    expect(headPort.argsHistory.last['azimuthDegrees'], 0);
+    expect(headPort.argsHistory.last['intervalMs'], 220);
 
     // 4. Clean stop cancels timer and stops native tone engine.
     await a.stop();

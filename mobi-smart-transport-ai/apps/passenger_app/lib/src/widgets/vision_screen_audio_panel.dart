@@ -78,6 +78,9 @@ class VisionScreenAudioPanel extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (audio.doorDemo)
+                    Text(audio.demoPhase,
+                        style: Theme.of(context).textTheme.titleMedium),
                   DiagnosticActionHint(
                       hint: '현재 진단 설정을 켜거나 끕니다.',
                       child: SwitchListTile(

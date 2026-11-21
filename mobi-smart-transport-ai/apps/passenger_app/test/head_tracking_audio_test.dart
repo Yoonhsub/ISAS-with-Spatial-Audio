@@ -94,6 +94,8 @@ void main() {
     final command = engine.registerGuidance(guidance, () => true)!;
     final run = engine.speak(command);
     await Future<void>.delayed(const Duration(milliseconds: 20));
+    await output.stopBeaconTargetStream();
+    expect(hrtf.calls, ['start']);
     await engine.stop();
     await expectLater(run, throwsA(isA<SpeechCancelled>()));
     expect(hrtf.calls.where((v) => v == 'stop'), isNotEmpty);

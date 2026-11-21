@@ -264,7 +264,7 @@ void main() {
     angle,
     calibration: mount,
     horizontalFovDegrees: fov,
-    cameraCapturedAt: capturedAt ?? state.snapshot.receivedAt ?? now,
+    frameReceivedAt: capturedAt ?? state.snapshot.receivedAt ?? now,
     now: now,
   );
 
@@ -409,7 +409,11 @@ void main() {
     for (final angle in [46.0, -46.0, double.nan, double.infinity]) {
       expect(calibrate(state, angle), isNull);
     }
-    expect(calibrate(state, 15, capturedAt: now), isNull);
+    expect(
+      calibrate(state, 15,
+          capturedAt: now.subtract(const Duration(milliseconds: 200))),
+      isNull,
+    );
     expect(identical(state.snapshot, original), isTrue);
     state.dispose();
   });
@@ -417,7 +421,8 @@ void main() {
     final state = HeadTrackingState()..publish(ready(170));
     final timestamp = state.snapshot.receivedAt;
     expect(calibrate(state, 15), -170);
-    expect(calibrate(state, 15), -170);
+    expect(calibrate(state, 15), isNull); // Wait for a fresh WT packet.
+    expect(state.snapshot.referenceYaw, -170);
     expect(state.snapshot.receivedAt, timestamp);
     state.dispose();
   });

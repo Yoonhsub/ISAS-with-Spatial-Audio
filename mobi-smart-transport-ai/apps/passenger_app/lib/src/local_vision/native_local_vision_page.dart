@@ -33,6 +33,8 @@ class LocalVisionPage extends StatefulWidget {
       this.authChanges,
       this.remoteSessionId,
       this.bundledModel = false,
+      this.doorDemo = false,
+      this.directionOnly = false,
       this.previewPriority,
       this.previewEngine,
       this.previewScope = 'camera-preview',
@@ -49,6 +51,8 @@ class LocalVisionPage extends StatefulWidget {
   final Stream<String?>? authChanges;
   final String? remoteSessionId;
   final bool bundledModel;
+  final bool doorDemo;
+  final bool directionOnly;
   final SpeechPriorityCoordinator? previewPriority;
   final SpatialVerificationEngine? previewEngine;
   final String previewScope;
@@ -72,7 +76,7 @@ class _LocalVisionPageState extends State<LocalVisionPage>
   StreamSubscription<int?>? _beaconRssiSubscription;
   final _history = DetectedFrameHistory();
   bool get _automaticPreviewAudio =>
-      widget.remoteApi != null && widget.onResult != null;
+      widget.doorDemo || (widget.remoteApi != null && widget.onResult != null);
   Uint8List? _model;
   VisionWorker? _worker;
   CameraController? _camera;
@@ -157,6 +161,8 @@ class _LocalVisionPageState extends State<LocalVisionPage>
           prioritizeByDistance: true,
           ccwPositiveYaw: true,
           continuousBeaconTone: true,
+          doorDemo: widget.doorDemo,
+          directionOnly: widget.directionOnly,
           initialBeaconRssi: widget.targetBeaconRssi,
           isCurrent: () =>
               mounted &&
@@ -360,6 +366,8 @@ class _LocalVisionPageState extends State<LocalVisionPage>
     }
     final camera = _camera, description = _description;
     if (!_pump.active || camera == null || description == null) return;
+    final receivedAt = DateTime.now().toUtc();
+    final receivedMicros = _clock.elapsedMicroseconds;
     final degrees = switch (camera.value.deviceOrientation) {
       DeviceOrientation.portraitUp => 0,
       DeviceOrientation.landscapeLeft => 90,
@@ -385,8 +393,8 @@ class _LocalVisionPageState extends State<LocalVisionPage>
         rotation: frameRotation(description.sensorOrientation, degrees,
             description.lensDirection == CameraLensDirection.front),
         mirror: description.lensDirection == CameraLensDirection.front,
-        receivedAt: DateTime.now().toUtc(),
-        receivedMicros: _clock.elapsedMicroseconds));
+        receivedAt: receivedAt,
+        receivedMicros: receivedMicros));
   }
 
   Future<void> _stop({String reason = '카메라 중지됨'}) {

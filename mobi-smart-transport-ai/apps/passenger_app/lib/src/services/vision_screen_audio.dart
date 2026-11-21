@@ -27,6 +27,8 @@ class VisionScreenAudio extends ChangeNotifier {
     this.pingOnly = false,
     this.ccwPositiveYaw = false,
     this.continuousBeaconTone = false,
+    this.doorDemo = false,
+    this.directionOnly = false,
     int? initialBeaconRssi,
   })  : headTracking = headTracking ?? sharedHeadTrackingState,
         horizontalFovDegrees = horizontalFovDegrees ?? _configuredFov,
@@ -60,6 +62,30 @@ class VisionScreenAudio extends ChangeNotifier {
   final bool requireDoorInBus;
   final bool prioritizeByDistance;
   final bool sceneMode, pingOnly, ccwPositiveYaw, continuousBeaconTone;
+  final bool doorDemo;
+  final bool directionOnly;
+  int get _toneIntervalMs => directionOnly ? 600 : beaconToneIntervalMs(_targetBeaconRssi!);
+  double _demoCameraAngle = 0;
+  int _demoCameraDeadline = 0;
+  String get demoPhase {
+    if (!enabled) return '카메라 시작 대기';
+    if (directionOnly && (!headTrackingEnabled || !canActivateHeadTracking)) {
+      return 'WT901 연결·정면 보정 후 머리 장착 모드에서 Head Tracking을 켜세요';
+    }
+    if (!directionOnly && _targetBeaconRssi == null) return '목표 비컨 탐색 중';
+    if (doorAnchorLocked && headTrackingEnabled && canActivateHeadTracking) {
+      return '문 방향 추적 중 · 머리 기준';
+    }
+    if (!directionOnly && _now() < _demoCameraDeadline) {
+      final side = switch (diagnostic['screenDirection']) {
+        'LEFT' => '왼쪽',
+        'RIGHT' => '오른쪽',
+        _ => '가운데',
+      };
+      return '버스 문 감지 · 화면 $side';
+    }
+    return directionOnly ? '버스 문 탐색 중' : '목표 비컨 감지 · 문 탐색 중';
+  }
   late final VisionSceneSummaryTracker _sceneTracker;
   Timer? _sceneTimer;
   Timer? _beaconToneTimer;
@@ -84,14 +110,34 @@ class VisionScreenAudio extends ChangeNotifier {
       headTrackingEnabled = false,
       busy = false,
       _activeHeadTracked = false,
-      _doorAnchorLocked = false,
       _disposed = false;
-  bool get doorAnchorLocked => _doorAnchorLocked;
+  // Briefly bridge lost detections while the head turns.
+  static const doorAnchorLifetime = Duration(seconds: 4);
+  int? _doorAnchorDeadline;
+  double? _doorYaw;
+  bool get doorAnchorLocked =>
+      _doorAnchorDeadline != null && _now() < _doorAnchorDeadline!;
+
+  void _expireDoorAnchor() {
+    if (_doorAnchorDeadline == null || doorAnchorLocked) return;
+    _doorAnchorDeadline = null;
+    _lastMeaning = null;
+    if (diagnostic['classId'] == 'bus_door') {
+      diagnostic = const {};
+      status = '문 방향 확인 중 · 새 검출 대기';
+    }
+    _notify();
+  }
   int? _targetBeaconRssi;
   int? get targetBeaconRssi => _targetBeaconRssi;
   void updateBeaconRssi(int? rssi) {
     if (_targetBeaconRssi == rssi) return;
     _targetBeaconRssi = rssi;
+    if (doorDemo && rssi == null) {
+      _demoCameraDeadline = 0;
+      _doorAnchorDeadline = null;
+      diagnostic = const {};
+    }
     _syncContinuousBeaconTone();
     if (!_disposed) {
       _notify();
@@ -113,6 +159,7 @@ class VisionScreenAudio extends ChangeNotifier {
   bool get canActivateHeadTracking =>
       hasCameraCalibration &&
       mountCalibration.verified &&
+      (!directionOnly || mountCalibration.mount == HeadTrackingCameraMount.headMountedCamera) &&
       mountCalibration.mount != HeadTrackingCameraMount.handheldPhone &&
       isCurrent() &&
       !priority.priorityActive &&
@@ -362,22 +409,27 @@ class VisionScreenAudio extends ChangeNotifier {
 
   void _syncContinuousBeaconTone() {
     if (!continuousBeaconTone) return;
+    _expireDoorAnchor();
     final output = engine.output;
     if (output is! ContinuousBeaconTargetOutput) return;
     final continuous = output as ContinuousBeaconTargetOutput;
     if (_disposed ||
         !enabled ||
         !isCurrent() ||
-        _targetBeaconRssi == null ||
+        (directionOnly
+            ? !doorAnchorLocked || !headTrackingEnabled || !canActivateHeadTracking
+            : _targetBeaconRssi == null) ||
         priority.priorityActive ||
         (busy && !_activeHeadTracked)) {
       unawaited(continuous.stopBeaconTargetStream());
       return;
     }
-    final intervalMs = beaconToneIntervalMs(_targetBeaconRssi!);
-    var azimuthDegrees = 0.0;
-    if (_doorAnchorLocked && headTrackingEnabled && canActivateHeadTracking) {
+    final intervalMs = _toneIntervalMs;
+    var azimuthDegrees =
+        doorDemo && _now() < _demoCameraDeadline ? _demoCameraAngle : 0.0;
+    if (doorAnchorLocked && headTrackingEnabled && canActivateHeadTracking) {
       final lockedAngle = lockedTargetAzimuthForHead(
+        targetYaw: doorDemo ? _doorYaw : null,
         sensor: headTracking.snapshot,
         now: DateTime.now().toUtc(),
         ccwPositiveYaw: ccwPositiveYaw,
@@ -423,7 +475,7 @@ class VisionScreenAudio extends ChangeNotifier {
   void _invalidateHeadTracking(String reason) {
     final mustStop = headTrackingEnabled && _activeHeadTracked;
     headTrackingEnabled = false;
-    _doorAnchorLocked = false;
+    _doorAnchorDeadline = null;
     if (mustStop) {
       _revision++;
       unawaited(_stopOwned());
@@ -475,7 +527,7 @@ class VisionScreenAudio extends ChangeNotifier {
     if (_disposed) return;
     if (!value) {
       headTrackingEnabled = false;
-      _doorAnchorLocked = false;
+      _doorAnchorDeadline = null;
       status = 'Head Tracking OFF · 기존 화면 기준 Cue 사용';
       _notify();
       return;
@@ -514,10 +566,11 @@ class VisionScreenAudio extends ChangeNotifier {
     _sceneTimer?.cancel();
     _beaconToneTimer?.cancel();
     _beaconToneTimer = null;
+    _demoCameraDeadline = 0;
     _sceneTracker.invalidate(reason: 'stopped');
     _sceneMeaning = null;
     enabled = false;
-    _doorAnchorLocked = false;
+    _doorAnchorDeadline = null;
     _syncContinuousBeaconTone();
     _revision++;
     _streakMeaning = null;
@@ -563,6 +616,7 @@ class VisionScreenAudio extends ChangeNotifier {
       return;
     }
     if (!enabled) return;
+    if (doorDemo && !directionOnly && _targetBeaconRssi == null) return;
     if (result['status'] != 'ok') {
       unawaited(stop());
       return;
@@ -575,6 +629,7 @@ class VisionScreenAudio extends ChangeNotifier {
       return;
     }
     _lastFrame = result['frameId'] as String;
+    _expireDoorAnchor();
     if (priority.priorityActive) {
       skippedBusy++;
       return;
@@ -589,11 +644,13 @@ class VisionScreenAudio extends ChangeNotifier {
       if (busy) skippedBusy++;
       return;
     }
-    final analysis = _analyzeFrame(rows);
+    final analysis = _analyzeFrame(doorDemo
+        ? rows.where((row) => row is Map && row['classId'] == 'bus_door').toList()
+        : rows);
     // Stop only our lower-priority preview output. Do not replay this frame
     // after cancellation: a new, fresh camera frame must confirm the obstacle.
     if (_preempting) return;
-    if (busy) {
+    if (busy && analysis.selected?['classId'] != 'bus_door') {
       if (_isObstacle(analysis.selected?['classId']) &&
           !_isObstacle(diagnostic['classId'])) {
         _preempting = true;
@@ -612,10 +669,12 @@ class VisionScreenAudio extends ChangeNotifier {
     final bestRank = analysis.bestRank;
 
     if (selected == null) {
+      if (doorDemo) _demoCameraDeadline = 0;
+      if (directionOnly) _syncContinuousBeaconTone();
       _streakMeaning = null;
       _streakCount = 0;
       if (rows.isEmpty) _lastMeaning = null;
-      if (_doorAnchorLocked && headTrackingEnabled && canActivateHeadTracking) {
+      if (doorAnchorLocked && headTrackingEnabled && canActivateHeadTracking) {
         _emitLockedDoorAnchorCue(result, age);
       }
       return;
@@ -632,14 +691,6 @@ class VisionScreenAudio extends ChangeNotifier {
     if (_streakCount < confirmationFrames) {
       return;
     }
-    final replacesNonObstacle =
-        _isObstacle(selected['classId']) && !_isObstacle(diagnostic['classId']);
-    if (_lastMeaning == meaning ||
-        (!replacesNonObstacle &&
-            _lastStarted != null &&
-            _now() - _lastStarted! < minimumInterval.inMicroseconds)) {
-      return;
-    }
     final sideText = switch (side) {
       TestDirection.left => '왼쪽',
       TestDirection.center => '가운데',
@@ -654,6 +705,117 @@ class VisionScreenAudio extends ChangeNotifier {
         revision == _revision &&
         isCurrent() &&
         !priority.priorityActive;
+    double? cameraAngle, correctedAngle, lockedReferenceYaw;
+    if (doorDemo && hasCameraCalibration) {
+      cameraAngle = horizontalAngleForNormalizedBbox(
+        x: (box['x'] as num).toDouble(),
+        width: (box['w'] as num).toDouble(),
+        horizontalFovDegrees: horizontalFovDegrees,
+      );
+      _demoCameraAngle = cameraAngle;
+      _demoCameraDeadline =
+          _now() - age.inMicroseconds + const Duration(seconds: 1).inMicroseconds;
+    }
+    if (headTrackingEnabled && canActivateHeadTracking) {
+      final now = DateTime.now().toUtc();
+      cameraAngle ??= horizontalAngleForNormalizedBbox(
+        x: (box['x'] as num).toDouble(),
+        width: (box['w'] as num).toDouble(),
+        horizontalFovDegrees: horizontalFovDegrees,
+      );
+      if (selected['classId'] == 'bus_door' &&
+          mountCalibration.mount == HeadTrackingCameraMount.headMountedCamera) {
+        // Local DetectionResult.capturedAt also carries the callback receipt.
+        final frameReceivedAt = receivedAt ??
+            DateTime.tryParse(result['capturedAt']?.toString() ?? '');
+        if (frameReceivedAt != null) {
+          lockedReferenceYaw = headTracking.calibrateZeroReferenceFromCameraAngle(
+            cameraAngle,
+            calibration: mountCalibration,
+            horizontalFovDegrees: horizontalFovDegrees,
+            frameReceivedAt: frameReceivedAt,
+            now: now,
+            ccwPositiveYaw: ccwPositiveYaw,
+            updateReference: !doorDemo,
+          );
+          if (lockedReferenceYaw != null) {
+            _doorYaw = lockedReferenceYaw;
+            _doorAnchorDeadline =
+                _now() - age.inMicroseconds + doorAnchorLifetime.inMicroseconds;
+          }
+        }
+      }
+      correctedAngle = selected['classId'] == 'bus_door' && doorAnchorLocked
+          ? lockedTargetAzimuthForHead(
+              targetYaw: doorDemo ? _doorYaw : null,
+              sensor: headTracking.snapshot,
+              now: now,
+              ccwPositiveYaw: ccwPositiveYaw,
+            )
+          : headTrackedAngleForMount(
+              cameraAngle: cameraAngle,
+              sensor: headTracking.snapshot,
+              now: now,
+              calibration: mountCalibration,
+              ccwPositiveYaw: ccwPositiveYaw,
+            );
+      if (correctedAngle == null) {
+        _invalidateHeadTracking('장착·센서 조건 무효');
+      }
+    } else if (headTrackingEnabled) {
+      _invalidateHeadTracking('장착·센서 조건 무효');
+    }
+    // A fresh door frame can update the bearing during speech or its cooldown.
+    // Audio admission remains exclusive.
+    if (busy) {
+      skippedBusy++;
+      return;
+    }
+    if (continuousBeaconTone &&
+        (directionOnly || _targetBeaconRssi != null) &&
+        engine.output is ContinuousBeaconTargetOutput &&
+        selected['classId'] == 'bus_door' &&
+        (correctedAngle != null || doorDemo)) {
+      diagnostic = {
+        'frameId': result['frameId'],
+        'capturedAt': result['capturedAt'],
+        'classId': selected['classId'],
+        'className': selected['className'],
+        'confidence': best,
+        'bbox': Map<String, Object?>.from(box),
+        'screenCenterX': cx,
+        'screenDirection': side.name.toUpperCase(),
+        'doorAnchorTracking': doorAnchorLocked,
+        'headTrackingStatus': headTracking.snapshot.status.name,
+        'headTrackingEnabled': headTrackingEnabled,
+        'headTrackingMount': mountCalibration.mount.name,
+        'axesAlignmentVerified': mountCalibration.axesAlignmentVerified,
+        if (cameraAngle != null) 'cameraAngleDegrees': cameraAngle,
+        if (doorAnchorLocked) 'correctedAngleDegrees': correctedAngle,
+        if (lockedReferenceYaw != null)
+          'lockedReferenceYawDegrees': lockedReferenceYaw,
+        'targetBeaconRssi': _targetBeaconRssi,
+        'anchorPingIntervalMs': _toneIntervalMs,
+        'coordinateFrame': 'upright-mirrored-camera-image',
+        'provenance': DirectionalGuidance.screenProvenance,
+        'guidanceEligible': false,
+        'text': text,
+      };
+      status = doorDemo ? demoPhase : doorAnchorLocked
+          ? '버스 문 포착 · 비컨 입체 유도 전환'
+          : '버스 문 포착 · 방향 기준점 대기';
+      _syncContinuousBeaconTone();
+      _notify();
+      return;
+    }
+    final replacesNonObstacle =
+        _isObstacle(selected['classId']) && !_isObstacle(diagnostic['classId']);
+    if (_lastMeaning == meaning ||
+        (!replacesNonObstacle &&
+            _lastStarted != null &&
+            _now() - _lastStarted! < minimumInterval.inMicroseconds)) {
+      return;
+    }
     final admission = ObservationAdmission(
       deadlineMicros: _now() +
           const Duration(seconds: 2).inMicroseconds -
@@ -675,77 +837,6 @@ class VisionScreenAudio extends ChangeNotifier {
       return true;
     }
 
-    double? cameraAngle, correctedAngle, lockedReferenceYaw;
-    if (headTrackingEnabled && canActivateHeadTracking) {
-      cameraAngle = horizontalAngleForNormalizedBbox(
-        x: (box['x'] as num).toDouble(),
-        width: (box['w'] as num).toDouble(),
-        horizontalFovDegrees: horizontalFovDegrees,
-      );
-      if (selected['classId'] == 'bus_door' &&
-          mountCalibration.mount == HeadTrackingCameraMount.headMountedCamera &&
-          headTracking.snapshot.receivedAt != null) {
-        lockedReferenceYaw = headTracking.calibrateZeroReferenceFromCameraAngle(
-          cameraAngle,
-          calibration: mountCalibration,
-          horizontalFovDegrees: horizontalFovDegrees,
-          cameraCapturedAt: headTracking.snapshot.receivedAt!,
-          now: DateTime.now().toUtc(),
-          ccwPositiveYaw: ccwPositiveYaw,
-        );
-        if (lockedReferenceYaw != null) {
-          _doorAnchorLocked = true;
-          _syncContinuousBeaconTone();
-        }
-      }
-      correctedAngle = headTrackedAngleForMount(
-        cameraAngle: cameraAngle,
-        sensor: headTracking.snapshot,
-        now: DateTime.now().toUtc(),
-        calibration: mountCalibration,
-        ccwPositiveYaw: ccwPositiveYaw,
-      );
-      if (correctedAngle == null) {
-        _invalidateHeadTracking('장착·센서 조건 무효');
-      }
-    } else if (headTrackingEnabled) {
-      _invalidateHeadTracking('장착·센서 조건 무효');
-    }
-    if (continuousBeaconTone &&
-        _targetBeaconRssi != null &&
-        engine.output is ContinuousBeaconTargetOutput &&
-        selected['classId'] == 'bus_door' &&
-        correctedAngle != null) {
-      diagnostic = {
-        'frameId': result['frameId'],
-        'capturedAt': result['capturedAt'],
-        'classId': selected['classId'],
-        'className': selected['className'],
-        'confidence': best,
-        'bbox': Map<String, Object?>.from(box),
-        'screenCenterX': cx,
-        'screenDirection': side.name.toUpperCase(),
-        'doorAnchorTracking': _doorAnchorLocked,
-        'headTrackingStatus': headTracking.snapshot.status.name,
-        'headTrackingEnabled': true,
-        'headTrackingMount': mountCalibration.mount.name,
-        'axesAlignmentVerified': mountCalibration.axesAlignmentVerified,
-        if (cameraAngle != null) 'cameraAngleDegrees': cameraAngle,
-        'correctedAngleDegrees': correctedAngle,
-        if (lockedReferenceYaw != null)
-          'lockedReferenceYawDegrees': lockedReferenceYaw,
-        'targetBeaconRssi': _targetBeaconRssi,
-        'anchorPingIntervalMs': beaconToneIntervalMs(_targetBeaconRssi!),
-        'coordinateFrame': 'upright-mirrored-camera-image',
-        'provenance': DirectionalGuidance.screenProvenance,
-        'guidanceEligible': false,
-        'text': text,
-      };
-      status = '버스 문 포착 · 비컨 입체 유도 전환';
-      _syncContinuousBeaconTone();
-      _notify();
-      return;
-    }
     final guidance = DirectionalGuidance(
       guidanceId: result['frameId'] as String,
       sessionGeneration: sessionGeneration,
@@ -842,6 +933,7 @@ class VisionScreenAudio extends ChangeNotifier {
   /// `bus_door` world azimuth even when the door leaves the camera FOV.
   void _emitLockedDoorAnchorCue(Map<String, Object?> result, Duration age) {
     final correctedAngle = lockedTargetAzimuthForHead(
+      targetYaw: doorDemo ? _doorYaw : null,
       sensor: headTracking.snapshot,
       now: DateTime.now().toUtc(),
       ccwPositiveYaw: ccwPositiveYaw,
@@ -850,7 +942,7 @@ class VisionScreenAudio extends ChangeNotifier {
       _invalidateHeadTracking('장착·센서 조건 무효');
       return;
     }
-    final pingIntervalMs = _targetBeaconRssi != null
+    final pingIntervalMs = directionOnly ? _toneIntervalMs : _targetBeaconRssi != null
         ? beaconToneIntervalMs(_targetBeaconRssi!)
         : 1200;
     final side = correctedAngle < -15
@@ -859,7 +951,7 @@ class VisionScreenAudio extends ChangeNotifier {
             ? TestDirection.right
             : TestDirection.center;
     if (continuousBeaconTone &&
-        _targetBeaconRssi != null &&
+        (directionOnly || _targetBeaconRssi != null) &&
         engine.output is ContinuousBeaconTargetOutput) {
       diagnostic = {
         'frameId': result['frameId'],
@@ -873,7 +965,7 @@ class VisionScreenAudio extends ChangeNotifier {
         'headTrackingMount': mountCalibration.mount.name,
         'axesAlignmentVerified': mountCalibration.axesAlignmentVerified,
         'correctedAngleDegrees': correctedAngle,
-        'lockedReferenceYawDegrees': headTracking.snapshot.referenceYaw,
+        'lockedReferenceYawDegrees': doorDemo ? _doorYaw : headTracking.snapshot.referenceYaw,
         'targetBeaconRssi': _targetBeaconRssi,
         'anchorPingIntervalMs': pingIntervalMs,
         'coordinateFrame': 'world-door-anchor',
@@ -896,7 +988,7 @@ class VisionScreenAudio extends ChangeNotifier {
     bool valid() =>
         !_disposed &&
         enabled &&
-        _doorAnchorLocked &&
+        doorAnchorLocked &&
         headTrackingEnabled &&
         revision == _revision &&
         isCurrent() &&
@@ -994,7 +1086,7 @@ class VisionScreenAudio extends ChangeNotifier {
             status = '시작 전 만료 또는 취소 · 새 검출 대기';
           } else {
             enabled = false;
-            _doorAnchorLocked = false;
+            _doorAnchorDeadline = null;
             status = '음향 시연 오류 · 출력 상태를 확인해 주세요';
           }
         }
@@ -1268,7 +1360,7 @@ class VisionScreenAudio extends ChangeNotifier {
     _beaconToneTimer = null;
     _sceneTracker.clear();
     enabled = false;
-    _doorAnchorLocked = false;
+    _doorAnchorDeadline = null;
     _syncContinuousBeaconTone();
     _revision++;
     priority.removeListener(_priorityChanged);

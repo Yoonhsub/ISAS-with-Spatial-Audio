@@ -19,15 +19,16 @@ val targetFile = File(explicitTarget).let {
     (if (it.isAbsolute) it else sourceRoot.resolve(explicitTarget)).canonicalFile
 }
 val mainTarget = sourceRoot.resolve("lib/main.dart").canonicalFile
+val doorDemoTarget = sourceRoot.resolve("lib/door_demo_main.dart").canonicalFile
 val cameraTarget = sourceRoot.resolve("lib/local_vision_main.dart").canonicalFile
 val backendTarget = sourceRoot.resolve("lib/local_android_backend_main.dart").canonicalFile
 val audioTarget = sourceRoot.resolve("lib/local_android_audio_main.dart").canonicalFile
 val cameraBackendTarget = sourceRoot.resolve("lib/local_android_camera_backend_main.dart").canonicalFile
-if (!targetFile.isFile || targetFile !in setOf(mainTarget, cameraTarget, backendTarget, audioTarget, cameraBackendTarget)) {
+if (!targetFile.isFile || targetFile !in setOf(mainTarget, doorDemoTarget, cameraTarget, backendTarget, audioTarget, cameraBackendTarget)) {
     isolationFailure("Unknown or outside-project Flutter target")
 }
 val defines = mutableMapOf<String, String>()
-val isolationKeys = setOf("MOBI_OFFLINE_CAMERA", "MOBI_ANDROID_LOCAL_BACKEND", "MOBI_ANDROID_LOCAL_AUDIO", "MOBI_ANDROID_CAMERA_BACKEND")
+val isolationKeys = setOf("MOBI_DOOR_DEMO", "MOBI_OFFLINE_CAMERA", "MOBI_ANDROID_LOCAL_BACKEND", "MOBI_ANDROID_LOCAL_AUDIO", "MOBI_ANDROID_CAMERA_BACKEND")
 val encodedDefines = (project.findProperty("dart-defines") as? String).orEmpty()
 if (encodedDefines.isNotEmpty()) {
     encodedDefines.split(',').forEach { encoded ->
@@ -46,11 +47,14 @@ if (encodedDefines.isNotEmpty()) {
     }
 }
 val offlineCamera = targetFile == cameraTarget
+val doorDemo = targetFile == doorDemoTarget
 val localBackend = targetFile == backendTarget
 val localAudio = targetFile == audioTarget
 val localCameraBackend = targetFile == cameraBackendTarget
 val presentIsolationKeys = defines.keys.intersect(isolationKeys)
 when {
+    doorDemo && (presentIsolationKeys != setOf("MOBI_DOOR_DEMO") ||
+        defines["MOBI_DOOR_DEMO"] != "true") -> isolationFailure("Door demo requires its explicit define")
     offlineCamera && (presentIsolationKeys != setOf("MOBI_OFFLINE_CAMERA") ||
         defines["MOBI_OFFLINE_CAMERA"] != "true") ->
         isolationFailure("Camera entry requires exactly its true isolation define")
@@ -66,7 +70,7 @@ when {
     targetFile == mainTarget && presentIsolationKeys.isNotEmpty() ->
         isolationFailure("Normal Passenger entry cannot use test isolation defines")
 }
-val testApplication = offlineCamera || localBackend || localAudio || localCameraBackend
+val testApplication = doorDemo || offlineCamera || localBackend || localAudio || localCameraBackend
 if (testApplication && gradle.startParameter.taskNames.any {
         it.contains("profile", ignoreCase = true) || it.contains("release", ignoreCase = true)
     }) {
@@ -97,6 +101,7 @@ android {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.mobi_passenger_app"
         if (offlineCamera) applicationIdSuffix = ".offlinevision"
+        if (doorDemo) applicationIdSuffix = ".doordemo"
         if (localBackend) applicationIdSuffix = ".localbackend"
         if (localAudio) applicationIdSuffix = ".localaudio"
         if (localCameraBackend) applicationIdSuffix = ".localvision"
@@ -108,18 +113,18 @@ android {
         versionName = flutter.versionName
     }
 
-    if (offlineCamera) {
+    if (offlineCamera || doorDemo) {
         // tools:node cannot be a manifest placeholder. Select a generated,
         // static debug overlay, leaving the ordinary manifests untouched.
         val offlineManifest = layout.buildDirectory
-            .file("generated/offline-camera/AndroidManifest.xml").get().asFile
+            .file("generated/${if (doorDemo) "door-demo" else "offline-camera"}/AndroidManifest.xml").get().asFile
         offlineManifest.parentFile.mkdirs()
         offlineManifest.writeText("""
             <manifest xmlns:android="http://schemas.android.com/apk/res/android"
                 xmlns:tools="http://schemas.android.com/tools">
                 <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
                 <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
-                <application>
+                <application ${if (doorDemo) """android:label="MOBI 문 방향 시연" tools:replace="android:label"""" else ""}>
                     <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
                 </application>
             </manifest>

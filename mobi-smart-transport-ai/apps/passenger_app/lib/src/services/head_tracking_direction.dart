@@ -128,16 +128,20 @@ class HeadTrackingState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Finds the closest READY WT sample to a camera frame using host receipt
-  /// timestamps. Old or future samples fail closed. This does not claim exposure
-  /// time synchronization or physical angle accuracy.
+  /// Finds the closest READY WT sample using host receipt timestamps. A longer
+  /// [maximumMatchedSampleAge] allows for inference delay while the latest
+  /// sample must still satisfy [maximumSampleAge].
   HeadTrackingFrameMatch? matchCameraFrame({
     required DateTime frameReceivedAt,
     required DateTime now,
     Duration maximumSkew = maximumCameraSensorSkew,
     Duration maximumSampleAge = maximumHeadSampleAgeForCue,
+    Duration? maximumMatchedSampleAge,
   }) {
-    if (maximumSkew.isNegative || maximumSampleAge <= Duration.zero) {
+    final matchedSampleAge = maximumMatchedSampleAge ?? maximumSampleAge;
+    if (maximumSkew.isNegative ||
+        maximumSampleAge <= Duration.zero ||
+        matchedSampleAge <= Duration.zero) {
       throw ArgumentError('Positive sample age and nonnegative skew required');
     }
     final checkedAt = now.toUtc();
@@ -147,7 +151,7 @@ class HeadTrackingState extends ChangeNotifier {
     HeadTrackingFrameMatch? best;
     for (final sample in _readySamples) {
       final at = sample.receivedAt!.toUtc();
-      if (!sample.usable(checkedAt, maximumAge: maximumSampleAge)) continue;
+      if (!sample.usable(checkedAt, maximumAge: matchedSampleAge)) continue;
       final skew = frameAt.difference(at);
       final absoluteSkew = skew.isNegative ? -skew : skew;
       if (absoluteSkew > maximumSkew) continue;
@@ -159,10 +163,8 @@ class HeadTrackingState extends ChangeNotifier {
   }
 
   /// Locks a target reference only for a verified head-mounted camera.
-  /// [cameraCapturedAt] must identify the same timestamp as the paired sensor
-  /// sample. Callers must supply a time-aligned sample, not the latest unrelated
-  /// BLE packet. Called by `VisionScreenAudio` when `bus_door` is confirmed on
-  /// a verified head-mounted camera.
+  /// Uses the yaw nearest [frameReceivedAt] to estimate the target bearing.
+  /// The result updates the reference while keeping the latest yaw for playback.
   ///
   /// Positive camera angle and measured axis offset point right. Fixed-world
   /// cameras use a different reference frame and must not use this formula.
@@ -171,21 +173,28 @@ class HeadTrackingState extends ChangeNotifier {
     double cameraAngle, {
     required HeadTrackingMountCalibration calibration,
     required double horizontalFovDegrees,
-    required DateTime cameraCapturedAt,
+    required DateTime frameReceivedAt,
     DateTime? now,
     bool ccwPositiveYaw = false,
+    bool updateReference = true,
   }) {
     final checkedAt = (now ?? DateTime.now()).toUtc();
     final sensor = _snapshot;
-    if (!sensor.usable(checkedAt) ||
-        !calibration.verified ||
+    if (!calibration.verified ||
         calibration.mount != HeadTrackingCameraMount.headMountedCamera ||
         !horizontalFovDegrees.isFinite ||
         horizontalFovDegrees <= 0 ||
         horizontalFovDegrees >= 180 ||
         !cameraAngle.isFinite ||
-        cameraAngle.abs() > horizontalFovDegrees / 2 ||
-        !cameraCapturedAt.isAtSameMomentAs(sensor.receivedAt!)) {
+        cameraAngle.abs() > horizontalFovDegrees / 2) {
+      return null;
+    }
+    final match = matchCameraFrame(
+      frameReceivedAt: frameReceivedAt,
+      now: checkedAt,
+      maximumMatchedSampleAge: const Duration(seconds: 2),
+    );
+    if (match == null) {
       return null;
     }
     final alignedAngle = relativeAngle(
@@ -193,9 +202,10 @@ class HeadTrackingState extends ChangeNotifier {
       -(calibration.cameraAxisOffsetDegrees!),
     );
     final newRef = relativeAngle(
-      sensor.filteredYaw!,
+      match.sample.filteredYaw!,
       ccwPositiveYaw ? alignedAngle : -alignedAngle,
     );
+    if (!updateReference) return newRef;
     publish(
       HeadTrackingSnapshot(
         status: sensor.status,
@@ -275,9 +285,11 @@ double? lockedTargetAzimuthForHead({
   required HeadTrackingSnapshot sensor,
   required DateTime now,
   bool ccwPositiveYaw = false,
+  double? targetYaw,
 }) {
   if (!sensor.usable(now)) return null;
+  final target = targetYaw ?? sensor.referenceYaw!;
   return ccwPositiveYaw
-      ? relativeAngle(sensor.filteredYaw!, sensor.referenceYaw!)
-      : relativeAngle(sensor.referenceYaw!, sensor.filteredYaw!);
+      ? relativeAngle(sensor.filteredYaw!, target)
+      : relativeAngle(target, sensor.filteredYaw!);
 }

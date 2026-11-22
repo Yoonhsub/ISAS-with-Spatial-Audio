@@ -13,6 +13,7 @@ import kotlin.math.sin
 
 /** Bus diagnostic pan and measured binaural obstacle warning. No system-volume changes. */
 class ToneTestEngine(context: Context) {
+    private val doorDemo = context.packageName.endsWith(".doordemo")
     private val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val handler = Handler(Looper.getMainLooper())
     private val workerGeneration = AtomicInteger(0)
@@ -116,6 +117,7 @@ class ToneTestEngine(context: Context) {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             val chunkFrames = 480
             val pcm = ShortArray(chunkFrames * 2)
+            val doorTone = if (doorDemo) DoorToneRenderer(rate) else null
             val targetPulseFrames = (rate * 0.12).toInt()
             val warningPulseFrames = (rate * 0.08).toInt()
             val warningSecondStart = (rate * 0.16).toInt()
@@ -137,6 +139,7 @@ class ToneTestEngine(context: Context) {
                     }
                     previous = current
                     val targetAzimuth = if (current.pattern == "target") current.azimuth else null
+                    if (targetAzimuth != null) doorTone?.setAngle(targetAzimuth)
                     val sinA = if (targetAzimuth != null) sin(Math.toRadians(targetAzimuth)) else 0.0
                     val itdSamples = sinA * 0.00066 * rate
                     val lDelay = if (itdSamples > 0.0) itdSamples else 0.0
@@ -150,6 +153,8 @@ class ToneTestEngine(context: Context) {
                         val warning = current.pattern == "warning"
                         if (warning && current.azimuth != null && spatial != null) {
                             spatial.render(phase, current.azimuth, pcm, i * 2)
+                        } else if (targetAzimuth != null && doorTone != null) {
+                            doorTone.render(phase, pcm, i * 2)
                         } else if (!warning && targetAzimuth != null) {
                             pcm[i * 2] = (targetPulseSample(phase - lDelay) * lGain).toInt()
                                 .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()

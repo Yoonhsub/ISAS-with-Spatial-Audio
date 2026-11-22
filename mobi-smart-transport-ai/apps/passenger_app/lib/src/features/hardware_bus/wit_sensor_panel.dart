@@ -11,6 +11,7 @@ import 'spatial_warning_check_panel.dart';
 import '../../services/head_tracking_direction.dart';
 
 import 'diagnostic_action_hint.dart';
+import 'diagnostic_button_label.dart';
 
 import '../../widgets/described_action.dart';
 
@@ -504,7 +505,8 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                                             _settingsLoadFailed
                                         ? null
                                         : _connect,
-                                    child: const Text('센서 연결')))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.bluetooth_connected, '센서 연결')))),
                         const SizedBox(width: 8),
                         Expanded(
                             child: DescribedAction.button(
@@ -517,7 +519,8 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                                         ? () =>
                                             unawaited(_close('센서 연결을 종료했습니다.'))
                                         : null,
-                                    child: const Text('연결 중지'))))
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.bluetooth_disabled, '연결 중지'))))
                       ]),
                       SizedBox(
                           width: double.infinity,
@@ -532,7 +535,9 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                                                 message: '정면 설정 완료');
                                           })
                                       : null,
-                                  child: const Text('현재 방향을 정면으로 설정')))),
+                                  child: const DiagnosticButtonLabel(
+                                      Icons.explore_outlined,
+                                      '현재 방향을 정면으로 설정')))),
                     ],
                   ))));
     }
@@ -553,7 +558,8 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                   child: OutlinedButton(
                       onPressed:
                           _idle && _configurationReady ? _configure : null,
-                      child: const Text('WT 주소 설정'))),
+                      child: const DiagnosticButtonLabel(
+                          Icons.settings_outlined, 'WT 주소 설정'))),
             Text(_status),
             Text('각도 프레임: $_frames개'),
             const SizedBox(height: 8),
@@ -567,7 +573,7 @@ class _WitSensorPanelState extends State<WitSensorPanel>
               ),
               Text(
                 _fresh ? '실시간 수신 중' : '수신 지연 · 마지막 각도값',
-                style: TextStyle(color: _fresh ? Colors.teal : Colors.brown),
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               if (_reference != null && _fresh)
                 Text(
@@ -590,7 +596,8 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                           !_idle || !_configurationReady || _settingsLoadFailed
                               ? null
                               : _connect,
-                      child: const Text('센서 연결'),
+                      child: const DiagnosticButtonLabel(
+                          Icons.bluetooth_connected, '센서 연결'),
                     )),
                 DescribedAction.button(
                     label: '센서 연결 해제',
@@ -601,7 +608,8 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                       onPressed: _connecting || _connected
                           ? () => unawaited(_close('센서 연결을 종료했습니다.'))
                           : null,
-                      child: const Text('센서 연결 해제'),
+                      child: const DiagnosticButtonLabel(
+                          Icons.bluetooth_disabled, '센서 연결 해제'),
                     )),
                 DiagnosticActionHint(
                     hint: '이 진단 조작을 실행합니다.',
@@ -614,7 +622,8 @@ class _WitSensorPanelState extends State<WitSensorPanel>
                                     message: '정면 보정 완료');
                               })
                           : null,
-                      child: const Text('도로 정면을 기준으로 설정'),
+                      child: const DiagnosticButtonLabel(
+                          Icons.explore_outlined, '도로 정면을 기준으로 설정'),
                     )),
               ],
             ),

@@ -9,6 +9,7 @@ import 'beacon_tone_interval.dart';
 import 'stationary_beacon_heading.dart';
 
 import 'diagnostic_action_hint.dart';
+import 'diagnostic_button_label.dart';
 
 import '../../widgets/described_action.dart';
 
@@ -493,7 +494,8 @@ class _DirectionAudioPanelState extends State<DirectionAudioPanel>
                         !_starting
                     ? _calibrateStationary
                     : null,
-                child: const Text('목표 비콘을 바라보고 방향 보정'),
+                child: const DiagnosticButtonLabel(
+                    Icons.explore_outlined, '목표 비콘을 바라보고 방향 보정'),
               )),
           Text(_stationary.calibrated
               ? '보정된 목표 방향 사용 · 이동 시 재보정 필요'
@@ -543,8 +545,8 @@ class _DirectionAudioPanelState extends State<DirectionAudioPanel>
                 retapWindowAfterDescription: true,
                 child: FilledButton(
                   onPressed: _ready && !_playing && !_starting ? _start : null,
-                  child:
-                      Text(widget.obstacles != null ? '안내 소리 시작' : '버스 소리 시작'),
+                  child: DiagnosticButtonLabel(Icons.volume_up_outlined,
+                      widget.obstacles != null ? '안내 소리 시작' : '버스 소리 시작'),
                 )),
             DiagnosticActionHint(
                 hint: '이 진단 조작을 실행합니다.',
@@ -552,7 +554,8 @@ class _DirectionAudioPanelState extends State<DirectionAudioPanel>
                   onPressed: _playing || _starting
                       ? () => unawaited(_stop('사용자가 테스트음을 중지했습니다.'))
                       : null,
-                  child: const Text('소리 중지'),
+                  child: const DiagnosticButtonLabel(
+                      Icons.volume_off_outlined, '소리 중지'),
                 )),
           ],
         ),

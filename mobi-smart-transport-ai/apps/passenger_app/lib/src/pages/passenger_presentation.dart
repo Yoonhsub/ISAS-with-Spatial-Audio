@@ -7,31 +7,106 @@ import 'package:mobi_mobile_auth/mobile_auth.dart';
 import '../services/speech_priority_coordinator.dart';
 import '../features/hardware_bus/safety_integration_check_page.dart';
 
-const mobiInk = Color(0xFF173550);
-const mobiBlue = Color(0xFF2378F3);
-ThemeData passengerTheme() => ThemeData(
-      useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(seedColor: mobiBlue),
-      scaffoldBackgroundColor: const Color(0xFFF6F8FB),
-      appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFFF6F8FB),
-          foregroundColor: mobiInk,
-          centerTitle: false),
-      filledButtonTheme: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
-              minimumSize: const Size(48, 56),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)))),
-      outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-              minimumSize: const Size(48, 52),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)))),
-      textTheme: const TextTheme(
-          headlineMedium: TextStyle(
-              fontWeight: FontWeight.w800, color: mobiInk, height: 1.4),
-          titleLarge: TextStyle(fontWeight: FontWeight.w700, color: mobiInk)),
-    );
+const mobiInk = Color(0xFF111111);
+const mobiSurface = Colors.white;
+
+ThemeData passengerTheme() {
+  const panel = Color(0xFFF1F1F1);
+  final scheme = ColorScheme.fromSeed(
+    seedColor: mobiInk,
+    dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
+  ).copyWith(
+    primary: mobiInk,
+    onPrimary: mobiSurface,
+    primaryContainer: panel,
+    onPrimaryContainer: mobiInk,
+    secondary: mobiInk,
+    onSecondary: mobiSurface,
+    secondaryContainer: panel,
+    onSecondaryContainer: mobiInk,
+    tertiary: mobiInk,
+    onTertiary: mobiSurface,
+    tertiaryContainer: panel,
+    onTertiaryContainer: mobiInk,
+    error: mobiInk,
+    onError: mobiSurface,
+    errorContainer: panel,
+    onErrorContainer: mobiInk,
+    surface: mobiSurface,
+    onSurface: mobiInk,
+    onSurfaceVariant: mobiInk,
+    surfaceContainer: mobiSurface,
+    surfaceContainerLow: mobiSurface,
+    surfaceContainerHigh: panel,
+    surfaceContainerHighest: panel,
+    outline: mobiInk,
+    outlineVariant: const Color(0xFF595959),
+    surfaceTint: Colors.transparent,
+  );
+  final base = ThemeData(useMaterial3: true, colorScheme: scheme);
+  return base.copyWith(
+    scaffoldBackgroundColor: mobiSurface,
+    appBarTheme: const AppBarTheme(
+      backgroundColor: mobiSurface,
+      foregroundColor: mobiInk,
+      surfaceTintColor: Colors.transparent,
+      centerTitle: false,
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        backgroundColor: mobiInk,
+        foregroundColor: mobiSurface,
+        minimumSize: const Size(48, 56),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+    ),
+    elevatedButtonTheme: ElevatedButtonThemeData(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: mobiInk,
+        foregroundColor: mobiSurface,
+        minimumSize: const Size(48, 56),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        backgroundColor: mobiSurface,
+        foregroundColor: mobiInk,
+        side: const BorderSide(color: mobiInk, width: 2),
+        minimumSize: const Size(48, 52),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ).copyWith(
+        side: WidgetStateProperty.resolveWith((states) {
+          return BorderSide(
+            color: states.contains(WidgetState.disabled)
+                ? const Color(0xFF767676)
+                : mobiInk,
+            width: 2,
+          );
+        }),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        foregroundColor: mobiInk,
+        minimumSize: const Size(48, 48),
+      ),
+    ),
+    textTheme: base.textTheme
+        .apply(bodyColor: mobiInk, displayColor: mobiInk)
+        .copyWith(
+          headlineMedium: base.textTheme.headlineMedium?.copyWith(
+            fontWeight: FontWeight.w800,
+            color: mobiInk,
+            height: 1.4,
+          ),
+          titleLarge: base.textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: mobiInk,
+          ),
+        ),
+  );
+}
 
 class PassengerLanding extends StatefulWidget {
   const PassengerLanding({
@@ -183,7 +258,7 @@ class _PassengerLandingState extends State<PassengerLanding> {
                   onPressed: widget.showSignOut && widget.onSignOut == null
                       ? null
                       : () => unawaited(_logout()),
-                  icon: const Icon(Icons.logout),
+                  icon: const Icon(Icons.logout_rounded),
                   label: const Text('로그아웃'),
                 ),
               const SizedBox(width: 8),
@@ -202,13 +277,9 @@ class _PassengerLandingState extends State<PassengerLanding> {
             _routeLabel,
             _routeDescription,
             FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: mobiInk,
-                foregroundColor: Colors.white,
-              ),
               onPressed: () =>
                   _tap(_LandingDestination.routeInfo, _routeDescription),
-              icon: const Icon(Icons.chat_bubble_outline),
+              icon: const Icon(Icons.search_rounded),
               label: const Text(_routeLabel),
             ),
           ),
@@ -219,15 +290,10 @@ class _PassengerLandingState extends State<PassengerLanding> {
             _LandingDestination.vision,
             _visionLabel,
             _visionDescription,
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: mobiInk,
-                backgroundColor: Colors.white,
-                side: const BorderSide(color: mobiInk, width: 2),
-              ),
+            FilledButton.icon(
               onPressed: () =>
                   _tap(_LandingDestination.vision, _visionDescription),
-              icon: const Icon(Icons.camera_alt_outlined),
+              icon: const Icon(Icons.videocam_rounded),
               label: const Text(_visionLabel),
             ),
           ),
@@ -238,15 +304,10 @@ class _PassengerLandingState extends State<PassengerLanding> {
             _LandingDestination.tests,
             '테스트',
             '기능별 점검 화면을 엽니다. 모의 입력은 실제 안내와 구분됩니다.',
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: mobiInk,
-                backgroundColor: Colors.white,
-                side: const BorderSide(color: mobiInk, width: 2),
-              ),
+            FilledButton.icon(
               onPressed: () =>
                   _tap(_LandingDestination.tests, '기능별 점검 화면을 엽니다.'),
-              icon: const Icon(Icons.fact_check_outlined),
+              icon: const Icon(Icons.checklist_rounded),
               label: const Text('테스트'),
             ),
           ),
@@ -263,21 +324,23 @@ class DeviceCheckPage extends StatelessWidget {
             child: ListView(padding: const EdgeInsets.all(24), children: [
           const Text('각 테스트는 별도 화면에서 실행합니다. 모의 결과는 실제 검증과 구분합니다.'),
           const SizedBox(height: 16),
-          OutlinedButton(
+          OutlinedButton.icon(
               onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                       builder: (_) => const SafetyIntegrationCheckPage())),
-              child: const Text('안전 중단·재개 통합 점검 (모의)')),
-          for (final entry in const <String, String>{
-            '/native-audio': '음성·방향 확인 (Android)',
-            '/standalone-vision': '서버 미연결 카메라·BLE 시연',
-            '/hardware-bus': '실기기 연동확인 · BLE/WT901/HRTF',
-            '/concurrent-hardware-test': '동시 기기 테스트 (임시)',
-            '/tago-diagnostics': 'TAGO 실데이터 진단',
+              icon: const Icon(Icons.fact_check_outlined),
+              label: const Text('안전 중단·재개 통합 점검 (모의)')),
+          for (final entry in const <String, (String, IconData)>{
+            '/native-audio': ('음성·방향 확인 (Android)', Icons.volume_up_outlined),
+            '/standalone-vision': ('서버 미연결 카메라·BLE 시연', Icons.videocam_outlined),
+            '/hardware-bus': ('실기기 연동확인 · BLE/WT901/HRTF', Icons.bluetooth_connected),
+            '/concurrent-hardware-test': ('동시 기기 테스트 (임시)', Icons.devices_other),
+            '/tago-diagnostics': ('TAGO 실데이터 진단', Icons.directions_bus_outlined),
           }.entries)
-            OutlinedButton(
+            OutlinedButton.icon(
                 onPressed: () => Navigator.of(context).pushNamed(entry.key),
-                child: Text(entry.value)),
+                icon: Icon(entry.value.$2),
+                label: Text(entry.value.$1)),
         ])),
       );
 }

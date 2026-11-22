@@ -52,12 +52,14 @@ class _AndroidCuePort implements NativeCuePort {
   }
 }
 
-/// Stereo only. No HRTF, head tracking, device forcing or microphone capture.
+/// Shared Android cue owner. Ordinary cues stay unchanged; its opt-in door
+/// stream requires caller-supplied fresh WT/visual bearings and confirmed stop.
 class NativeDirectionalCueOutput
     implements
         SpatialTestOutput,
         DirectionalCueOutput,
         HeadTrackedCueOutput,
+        ContinuousBeaconTargetOutput,
         InformationalDirectionalCueOutput {
   NativeDirectionalCueOutput(
       {NativeCuePort? port, HeadTrackedCuePort? headTrackedPort})
@@ -76,7 +78,10 @@ class NativeDirectionalCueOutput
   bool _closed = false,
       _ready = false,
       _uncertain = false,
-      _headTrackedActive = false;
+      _headTrackedActive = false,
+      _continuousBeaconStream = false,
+      _beaconStreamRequested = false;
+  int _beaconRevision = 0;
   Completer<bool>? _playing;
   Future<void>? _stopBarrier, _disposing;
   Map<String, dynamic> _probe = {
@@ -130,6 +135,9 @@ class NativeDirectionalCueOutput
   Future<bool> _playStereo(TestDirection direction,
       {InformationalCueTone? tone}) async {
     _ensureOpen();
+    if (_beaconStreamRequested || _continuousBeaconStream) {
+      await stopBeaconTargetStream();
+    }
     if (!_ready || _playing != null || _stopBarrier != null) {
       throw StateError('Prepare first; simultaneous cues forbidden');
     }
@@ -178,6 +186,9 @@ class NativeDirectionalCueOutput
   @override
   Future<bool> playHeadTrackedCue(double azimuthDegrees) async {
     _ensureOpen();
+    if (_beaconStreamRequested || _continuousBeaconStream) {
+      await stopBeaconTargetStream();
+    }
     if (!_ready ||
         _playing != null ||
         _stopBarrier != null ||
@@ -241,6 +252,108 @@ class NativeDirectionalCueOutput
     return pending.future;
   }
 
+  @override
+  Future<bool> syncBeaconTargetStream({
+    required int intervalMs,
+    required double azimuthDegrees,
+    required int sensorAgeMs,
+    required int beaconAgeMs,
+  }) async {
+    _ensureOpen();
+    if (!_ready ||
+        _playing != null ||
+        _stopBarrier != null ||
+        !_validBeaconParameters(
+            intervalMs, azimuthDegrees, sensorAgeMs, beaconAgeMs)) {
+      throw StateError('Fresh verified door, WT and selected beacon required');
+    }
+    final revision = ++_beaconRevision;
+    _beaconStreamRequested = true;
+    final wasActive = _continuousBeaconStream;
+    // Native start/update can already be active before the reply arrives.
+    _headTrackedActive = true;
+    try {
+      final data = await _headTrackedPort.invoke(wasActive ? 'update' : 'start', {
+        'left': .7071067811865476,
+        'right': .7071067811865476,
+        'sensorAgeMs': sensorAgeMs,
+        'intervalMs': intervalMs,
+        'beaconAgeMs': beaconAgeMs,
+        'pattern': 'door_demo',
+        'azimuthDegrees': azimuthDegrees,
+      });
+      if (revision != _beaconRevision || _closed) {
+        final stopped = await _headTrackedPort.invoke('stop', const {});
+        if (stopped['confirmed'] != true) {
+          _uncertain = true;
+          throw StateError('Cancelled door stream stop not confirmed');
+        }
+        _headTrackedActive = false;
+        _continuousBeaconStream = false;
+        _beaconStreamRequested = false;
+        return false;
+      }
+      if (data['running'] != true || data['spatial'] != true) {
+        throw StateError(data['reason'] ?? 'Door audio start not confirmed');
+      }
+      _continuousBeaconStream = true;
+      _probe = {
+        ..._probe,
+        ...data,
+        'phase': 'door-beacon-streaming',
+        'active': true,
+        'sensorAgeMs': sensorAgeMs,
+        'beaconAgeMs': beaconAgeMs,
+        'intervalMs': intervalMs,
+        'azimuthDegrees': azimuthDegrees,
+      };
+      return true;
+    } catch (error, stack) {
+      _beaconStreamRequested = false;
+      _uncertain = true;
+      try {
+        await stopBeaconTargetStream();
+      } catch (_) {
+        // Keep output uncertain if native stop cannot be acknowledged.
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
+  }
+
+  bool _validBeaconParameters(
+      int interval, double angle, int sensorAge, int beaconAge) =>
+      interval >= 250 &&
+      interval <= 1400 &&
+      angle.isFinite &&
+      angle >= -180 &&
+      angle <= 180 &&
+      sensorAge >= 0 &&
+      sensorAge <= 249 &&
+      beaconAge >= 0 &&
+      beaconAge <= 1199;
+
+  @override
+  Future<bool> stopBeaconTargetStream() async {
+    ++_beaconRevision;
+    if (!_headTrackedActive) {
+      _continuousBeaconStream = false;
+      _beaconStreamRequested = false;
+      return true;
+    }
+    final data = await _headTrackedPort.invoke('stop', const {});
+    if (data['confirmed'] != true) {
+      _uncertain = true;
+      throw StateError('Native door audio stop not confirmed');
+    }
+    _headTrackedActive = false;
+    _continuousBeaconStream = false;
+    _beaconStreamRequested = false;
+    if (!_closed) {
+      _probe = {..._probe, ...data, 'phase': 'door-beacon-stopped', 'active': false};
+    }
+    return true;
+  }
+
   void _event(Map<String, dynamic> data) {
     if (_closed || data['owner'] != _owner || data['id'] != _id) return;
     final pending = _playing;
@@ -273,6 +386,7 @@ class NativeDirectionalCueOutput
   Future<void> stop() {
     if (_disposing != null) return _disposing!;
     if (_stopBarrier != null) return _stopBarrier!;
+    ++_beaconRevision;
     _retire();
     _uncertain = true;
     final operation = () async {
@@ -283,6 +397,8 @@ class NativeDirectionalCueOutput
         throw StateError('Native stop not confirmed');
       }
       _headTrackedActive = false;
+      _continuousBeaconStream = false;
+      _beaconStreamRequested = false;
       _uncertain = false;
       if (!_closed) {
         _probe = {..._probe, ...data, 'phase': 'stopped', 'active': false};
@@ -298,6 +414,7 @@ class NativeDirectionalCueOutput
   Future<void> dispose() {
     if (_disposing != null) return _disposing!;
     _closed = true;
+    ++_beaconRevision;
     _retire();
     _probe = {..._probe, 'phase': 'closing'};
     return _disposing = () async {
@@ -312,6 +429,8 @@ class NativeDirectionalCueOutput
           throw StateError('HRTF dispose stop not confirmed');
         }
         _headTrackedActive = false;
+        _continuousBeaconStream = false;
+        _beaconStreamRequested = false;
       }
       final data = await _port.invoke('dispose', _args());
       if (data['confirmed'] != true) {

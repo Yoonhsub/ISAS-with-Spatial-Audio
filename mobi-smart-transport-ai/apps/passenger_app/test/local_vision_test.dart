@@ -11,6 +11,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobi_passenger_app/src/local_vision/frame_pump.dart';
 import 'package:mobi_passenger_app/src/local_vision/vision_codec.dart';
+import 'package:mobi_passenger_app/src/services/v3_agent_api_client.dart';
 
 VisionFrame frame(int ticks, {int rotation = 0, bool mirror = false}) =>
     VisionFrame(
@@ -136,6 +137,25 @@ void main() {
     expect(pump.active, false);
     expect(pump.error, '연결 실패');
     expect(pump.observation, isNull);
+    pump.dispose();
+  });
+
+  test('FramePump reports redacted HTTP category separately from inference',
+      () async {
+    var localResult = false;
+    final pump = FramePump(
+      (f) async => observation(f),
+      () => 100,
+      onLocalResult: (_, __) => localResult = true,
+      onResult: (_) async =>
+          throw const VisionLeaseException(terminal: true, statusCode: 403),
+    );
+    pump.start();
+    pump.submit(frame(1));
+    await flush();
+    expect(localResult, isTrue);
+    expect(pump.active, isFalse);
+    expect(pump.error, '서버 인식 결과 전송 실패 (HTTP 403)');
     pump.dispose();
   });
 

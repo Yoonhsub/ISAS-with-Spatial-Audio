@@ -7,6 +7,7 @@ import '../services/audio_haptic_cue_service.dart';
 import '../services/backend_api_client.dart';
 import '../services/cloud_ride_intent.dart';
 import 'ride_request_panel.dart';
+import '../services/confirmed_ride_selection.dart';
 import '../services/v3_agent_api_client.dart';
 import '../services/voice_guide_service.dart';
 
@@ -17,6 +18,7 @@ class HomePage extends StatefulWidget {
     required this.onEditAgentName,
     required this.onReturnToModeSelection,
     required this.dataMode,
+    this.rideSelection,
   })  : _testHarness = false,
         _testApi = null,
         _testAuth = null,
@@ -33,6 +35,7 @@ class HomePage extends StatefulWidget {
     required this.dataMode,
     required BackendApiClient api,
     required AuthSession auth,
+    this.rideSelection,
   })  : _testHarness = true,
         _testApi = api,
         _testAuth = auth,
@@ -46,12 +49,14 @@ class HomePage extends StatefulWidget {
     required this.onEditAgentName,
     required this.onReturnToModeSelection,
     required CloudRideBinding binding,
-  })  : dataMode = 'mock',
+  })  : rideSelection = null,
+        dataMode = 'mock',
         _testHarness = false,
         _testApi = null,
         _testAuth = null,
         _cloudBinding = binding;
 
+  final ConfirmedRideSelection? rideSelection;
   final CloudRideBinding? _cloudBinding;
   bool get _isolateV3 => _testHarness || _cloudBinding != null;
 
@@ -580,13 +585,19 @@ class _HomePageState extends State<HomePage> {
                   },
                 ),
               const SizedBox(height: 12),
-              RideRequestPanel(
-                  api: _backendApiClient,
-                  session: _auth,
-                  store: widget._cloudBinding == null
-                      ? null
-                      : CloudRideIntentStore(widget._cloudBinding!.plan),
-                  draft: _buildRideRequestDraft()),
+              if (widget.rideSelection != null)
+                RideRequestPanel.confirmed(
+                    api: _backendApiClient,
+                    session: _auth,
+                    selection: widget.rideSelection!)
+              else
+                RideRequestPanel(
+                    api: _backendApiClient,
+                    session: _auth,
+                    store: widget._cloudBinding == null
+                        ? null
+                        : CloudRideIntentStore(widget._cloudBinding!.plan),
+                    draft: widget._isolateV3 ? _buildRideRequestDraft() : null),
               const SizedBox(height: 16),
               const _MvpNoticeCard(),
             ],

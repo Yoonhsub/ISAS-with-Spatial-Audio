@@ -246,9 +246,10 @@ class _VisionObservationPanelState extends State<VisionObservationPanel> {
                       ? _speech.setEnabled
                       : null),
             if (!widget.hideSpeechControls)
-              OutlinedButton(
+              OutlinedButton.icon(
                   onPressed: _speech.enabled ? _speech.stop : null,
-                  child: const Text('Vision 음성 중지')),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('Vision 음성 중지')),
             if (!widget.hideSpeechControls) Text(_speech.status),
             if (_items.isEmpty) const Text('현재 관찰 정보가 없습니다'),
             for (final item in _items) _observation(item),
@@ -420,24 +421,30 @@ class _VisionPreviewPageState extends State<VisionPreviewPage> {
             Text(widget.inputLabel),
             const Text(
                 'Preview only · guidanceEligible=false · Safety Event / 음향 출력 없음'),
-            Wrap(spacing: 12, children: [
-              ElevatedButton(
+            Wrap(spacing: 12, runSpacing: 8, children: [
+              FilledButton.icon(
                   onPressed:
                       _busy || _ended || widget.pump.active ? null : _start,
-                  child: const Text('Vision 시작 / 복구')),
-              OutlinedButton(
+                  icon: const Icon(Icons.videocam_outlined),
+                  label: const Text('Vision 시작 / 복구')),
+              OutlinedButton.icon(
                   onPressed: _busy || _ended ? null : () => _stop(),
-                  child: const Text('Vision 중단')),
-              OutlinedButton(
+                  icon: const Icon(Icons.stop),
+                  label: const Text('Vision 중단')),
+              OutlinedButton.icon(
                   onPressed: _busy || _ended ? null : () => _stop(end: true),
-                  child: const Text('세션 종료')),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('세션 종료')),
             ]),
             Text(_status),
             Text(
                 '프레임 수신 ${widget.pump.received} · 처리 ${widget.pump.processed} · 전송 확인 ${widget.producer.submitted}'),
             if (widget.pump.error != null)
               Text(widget.pump.error!,
-                  style: const TextStyle(color: Colors.red)),
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurface,
+                    fontWeight: FontWeight.bold,
+                  )),
             if (!_ended &&
                 widget.pump.active &&
                 widget.pump.error == null &&

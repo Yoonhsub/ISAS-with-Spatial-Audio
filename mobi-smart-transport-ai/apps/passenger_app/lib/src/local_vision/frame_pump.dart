@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:mobi_mobile_auth/mobile_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'vision_codec.dart';
+import '../services/v3_agent_api_client.dart';
 
 /// One in-flight inference and at most one replaceable pending frame.
 class FramePump extends ChangeNotifier {
@@ -118,9 +119,12 @@ class FramePump extends ChangeNotifier {
           _notify();
         } catch (failure) {
           if (active && generation == _generation) {
-            error = failure is VisionProducerException
-                ? failure.message
-                : '모바일 추론 실패 · 카메라를 다시 시작해 주세요';
+            error = switch (failure) {
+              VisionProducerException(:final message) => message,
+              VisionLeaseException(:final diagnosticCode) =>
+                '서버 인식 결과 전송 실패 ($diagnosticCode)',
+              _ => '모바일 추론 실패 · 카메라를 다시 시작해 주세요',
+            };
             active = false;
             observation = null;
             _latest = null;

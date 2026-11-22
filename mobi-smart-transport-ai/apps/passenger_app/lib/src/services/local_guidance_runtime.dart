@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:mobi_mobile_auth/mobile_auth.dart';
 import 'v3_agent_api_client.dart';
+import 'backend_api_client.dart';
 import 'session_guidance_audio.dart';
 import 'speech_priority_coordinator.dart';
 
@@ -16,6 +17,7 @@ class LocalGuidanceRuntime {
       required this.priority,
       required this.audio,
       required this.controls,
+      this.rideApi,
       this.beaconScanner,
       this.beaconIdentities = const []}) {
     final uri = Uri.parse(client.baseUrl);
@@ -30,6 +32,7 @@ class LocalGuidanceRuntime {
       throw StateError('Explicit loopback debug Guidance runtime required');
     }
   }
+  final BackendApiClient? rideApi;
   final BeaconScanner? beaconScanner;
   final List<BeaconIngestIdentity> beaconIdentities;
   final V3AgentApiClient client;

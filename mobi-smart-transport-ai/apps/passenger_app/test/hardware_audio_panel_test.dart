@@ -65,7 +65,8 @@ void main() {
                 busEnabled: enabled,
                 audioScope: scope,
                 beaconRssi: rssi,
-                beaconSeenAt: seen ?? DateTime.now(),
+                wallClock: TestWidgetsFlutterBinding.instance.clock.now,
+                beaconSeenAt: seen ?? TestWidgetsFlutterBinding.instance.clock.now(),
               ),
             ),
           ),
@@ -110,7 +111,7 @@ void main() {
     await tester.pumpWidget(panel());
     await start(tester);
     await tester.pumpWidget(
-      panel(seen: DateTime.now().subtract(const Duration(seconds: 4))),
+      panel(seen: tester.binding.clock.now().subtract(const Duration(seconds: 4))),
     );
     await tester.pump();
     expect(calls.last.method, 'stop');

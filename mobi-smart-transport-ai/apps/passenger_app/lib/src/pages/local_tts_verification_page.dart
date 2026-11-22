@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../features/hardware_bus/diagnostic_button_label.dart';
 import '../services/audio_haptic_cue_service.dart';
 import '../services/speech_priority_coordinator.dart';
 import '../services/v3_agent_api_client.dart';
@@ -267,23 +268,28 @@ class _LocalTtsVerificationPageState extends State<LocalTtsVerificationPage> {
                                     _diagnostics['localKoreanAvailable'] == true
                                 ? _testSpeech
                                 : null,
-                            child: const Text('1. 테스트 음성 출력')),
+                            child: const DiagnosticButtonLabel(
+                                Icons.record_voice_over_outlined,
+                                '1. 테스트 음성 출력')),
                         ElevatedButton(
                             onPressed:
                                 _armed && _current && !_failed && !_manualBusy
                                     ? _emit
                                     : null,
-                            child: const Text('2. 합성 안내 수신')),
+                            child: const DiagnosticButtonLabel(
+                                Icons.hearing, '2. 합성 안내 수신')),
                         ElevatedButton(
                             onPressed:
                                 _armed && _current && !_failed && !_holdBusy
                                     ? _hold
                                     : null,
-                            child: const Text('3. Live Hold 선점')),
+                            child: const DiagnosticButtonLabel(
+                                Icons.pause_circle_outline, '3. Live Hold 선점')),
                         OutlinedButton(
                             onPressed:
                                 !_endBusy && _current ? () => _end() : null,
-                            child: const Text('4. 세션 종료·음성 중지')),
+                            child: const DiagnosticButtonLabel(
+                                Icons.stop_circle_outlined, '4. 세션 종료·음성 중지')),
                         OutlinedButton(
                             onPressed: !_endBusy && _current
                                 ? () => _end(relogin: true)
@@ -296,7 +302,8 @@ class _LocalTtsVerificationPageState extends State<LocalTtsVerificationPage> {
                                     !_failed
                                 ? _newSession
                                 : null,
-                            child: const Text('새 세션')),
+                            child: const DiagnosticButtonLabel(
+                                Icons.add_circle_outline, '새 세션')),
                       ]),
                       Wrap(spacing: 8, children: [
                         TextButton(

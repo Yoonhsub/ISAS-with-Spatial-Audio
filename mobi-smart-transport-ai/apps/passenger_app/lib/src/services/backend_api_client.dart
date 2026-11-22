@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'accepted_ride_beacon.dart';
+
 import 'package:http/http.dart' as http;
 import 'package:mobi_mobile_auth/mobile_auth.dart';
 
@@ -50,7 +52,9 @@ class RideRequestCreateResult {
 }
 
 class RideRequestStatusResult {
+  final AcceptedRide? acceptedRide;
   const RideRequestStatusResult({
+    this.acceptedRide,
     required this.isSuccess,
     required this.statusLabel,
     required this.description,
@@ -283,6 +287,7 @@ class BackendApiClient {
   Future<RideRequestCreateResult> createRideRequest({
     required RideRequestDraft draft,
     required String idempotencyKey,
+    Future<void>? abortTrigger,
   }) async {
     if (useMockData) {
       await Future<void>.delayed(const Duration(milliseconds: 300));
@@ -374,6 +379,7 @@ class BackendApiClient {
 
   Future<RideRequestStatusResult> fetchRideRequestStatus({
     required String requestId,
+    Future<void>? abortTrigger,
   }) async {
     if (useMockData) {
       await Future<void>.delayed(const Duration(milliseconds: 250));
@@ -388,7 +394,8 @@ class BackendApiClient {
 
     try {
       final response = await _authClient
-          .get(_buildUri('/ride-requests/${Uri.encodeComponent(requestId)}'))
+          .get(_buildUri('/ride-requests/${Uri.encodeComponent(requestId)}'),
+              abortTrigger: abortTrigger)
           .timeout(timeout);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -414,6 +421,13 @@ class BackendApiClient {
 
       final status = decodedBody['status']?.toString();
 
+      if (decodedBody['requestId'] != requestId) {
+        return const RideRequestStatusResult(
+            isSuccess: false,
+            statusLabel: '응답 확인 필요',
+            description: '조회한 요청 ID가 일치하지 않습니다.',
+            semanticHint: '요청 식별자 불일치');
+      }
       if (status == null || status.isEmpty) {
         return const RideRequestStatusResult(
           isSuccess: false,
@@ -426,7 +440,12 @@ class BackendApiClient {
       return RideRequestStatusResult(
         isSuccess: true,
         statusLabel: status,
-        description: '탑승 요청 현재 상태는 $status 입니다.',
+        acceptedRide: AcceptedRide.read(decodedBody, requestId),
+        description: switch (status) {
+          'ACCEPTED' => '기사님이 탑승 요청을 수락했습니다.',
+          'REJECTED' => '기사님이 탑승 요청을 거절했습니다.',
+          _ => '탑승 요청 현재 상태는 $status 입니다.',
+        },
         semanticHint: '탑승 요청 상태 조회 성공 상태입니다.',
       );
     } on AuthenticatedApiException catch (error) {

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'vision_codec.dart';
+import '../services/passenger_bus_guide.dart';
 import '../services/v3_agent_api_client.dart';
 import 'package:flutter/material.dart';
 import '../services/speech_priority_coordinator.dart';
@@ -21,6 +22,7 @@ class LocalVisionPage extends StatelessWidget {
       SpeechPriorityCoordinator? previewPriority,
       SpatialVerificationEngine? previewEngine,
       String previewScope = 'camera-preview',
+      PassengerBusGuide? busGuide,
       int? targetBeaconRssi,
       Stream<int?>? beaconRssiStream});
   @override

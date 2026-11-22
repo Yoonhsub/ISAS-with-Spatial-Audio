@@ -123,6 +123,7 @@ class _StandaloneVisionPageState extends State<StandaloneVisionPage>
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final appBar = AppBar(
       title: const Text('장애물 탐지'),
       actions: [
@@ -148,13 +149,26 @@ class _StandaloneVisionPageState extends State<StandaloneVisionPage>
     return Scaffold(
       appBar: appBar,
       body: ListView(padding: const EdgeInsets.all(16), children: [
-        const Text('Backend 미연결 · 카메라와 음향은 휴대폰에서 실행합니다. PC·USB 연결이 필요하지 않습니다.'),
+        DecoratedBox(
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            border: Border.all(color: scheme.onSurface),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              'Backend 미연결 · 카메라와 음향은 휴대폰에서 실행합니다. PC·USB 연결이 필요하지 않습니다.',
+              style: TextStyle(color: scheme.onSurface),
+            ),
+          ),
+        ),
         const SizedBox(height: 16),
         Text('카메라로 주변 확인', style: Theme.of(context).textTheme.headlineSmall),
         const SizedBox(height: 16),
         FilledButton.icon(
           onPressed: _cameraOpen ? null : _openCamera,
-          icon: const Icon(Icons.camera_alt_outlined),
+          icon: const Icon(Icons.videocam_outlined),
           label: Text(_cameraOpen ? '카메라 화면 준비 중' : '로컬 카메라·음향 시작'),
         ),
         const Text(
@@ -167,8 +181,10 @@ class _StandaloneVisionPageState extends State<StandaloneVisionPage>
           Semantics(
               liveRegion: true,
               child: Text(_error!,
-                  style:
-                      TextStyle(color: Theme.of(context).colorScheme.error))),
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.bold,
+                  ))),
         if (!_cameraOpen) ...[
           const Divider(),
           const Text('BLE · 서버 없이 실제 스캔 / 로컬 시연 매핑만 사용'),

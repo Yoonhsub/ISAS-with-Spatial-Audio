@@ -1,6 +1,15 @@
 import '../services/shared_guidance_session.dart';
+import '../services/saved_ride_trial.dart';
+import '../services/accepted_ride_beacon.dart';
+import '../services/ride_creation_intent.dart';
+import '../services/passenger_bus_guide.dart';
+import '../features/hardware_bus/hardware_test_settings.dart';
+import '../services/confirmed_ride_selection.dart';
+import '../services/backend_api_client.dart';
+import 'ride_request_panel.dart';
 import '../widgets/described_action.dart';
 import '../services/route_data_presentation.dart';
+import '../services/route_chat_history.dart';
 import '../widgets/route_data_status.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -96,8 +105,83 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   SpeechPriorityCoordinator get _priority =>
       widget.localRuntime?.priority ?? _nativePriority ?? sharedSpeechPriority;
 
+  late final _rideApi = widget.localRuntime?.rideApi ?? BackendApiClient(
+      baseUrl: _client.baseUrl,
+      useMockData: false,
+      authClient: AuthenticatedApiClient(
+          tokenLoader: _auth.getIdToken,
+          onUnauthorized: _auth.signOut,
+          requestGuard: _captureAuthGuard));
+  static const _singleSearchTrial = bool.fromEnvironment('MOBI_SINGLE_SEARCH_TRIAL');
+  late final _savedTrial = SavedRideTrial.enabled ? SavedRideTrial() : null;
+  bool get _inSavedTrial =>
+      _savedTrial != null && _sessionId == SavedRideTrial.sessionId;
+  ConfirmedRideSelection? get _rideSelection =>
+      widget.sharedSession?.rideSelection;
+  void _invalidateRide() {
+    if (_sharedSessionCurrent) _rideSelection?.invalidate();
+  }
+
   String _sessionId = '';
   bool _cameraOpen = false;
+  PassengerBusGuide? _busGuide;
+
+  void _guideChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _syncGuidePriority() => _busGuide?.priority(_priority.priorityActive);
+
+  void _prepareAcceptedBusGuide() {
+    if (!widget.visionOnly || !_androidAudio || (widget.localRuntime != null && widget.localRuntime!.rideApi == null)) return;
+    final uid = _auth.currentAccount?.uid, session = _sessionId;
+    if (uid == null || session.isEmpty) return;
+    final guard = _captureAuthGuard();
+    final trial = _inSavedTrial;
+    final store = trial ? _savedTrial! : RideCreationIntentStore();
+    bool current() => mounted && _audioForeground && _speechAuthValid &&
+        _sharedSessionCurrent && guard() && _auth.currentAccount?.uid == uid &&
+        _sessionId == session;
+    Future<String?> requestId() async {
+      final bound = await store.sessionRequest(uid, session);
+      // Earlier saved trial builds stored one run-scoped request for this session.
+      if (bound != null || !trial) return bound;
+      return await RideCreationIntentStore().sessionRequest(uid, session) ?? await store.activeRequest(uid);
+    }
+    Future<AcceptedRide?> lookup() async {
+      final id = await requestId();
+      if (id == null || !current()) return null;
+      final ride = (await _rideApi.fetchRideRequestStatus(requestId: id)).acceptedRide;
+      if (ride == null || ride.userId != uid || !current() || await requestId() != id) return null;
+      final state = _sessionState;
+      if (trial && (ride.routeId != state?.selectedRouteId ||
+          ride.busNo != state?.selectedRouteNo || ride.stopId != state?.selectedStopId)) return null;
+      return ride;
+    }
+    RideRequestDraft? selectedRide() {
+      final selection = _rideSelection;
+      final draft = selection?.value;
+      final state = _sessionState;
+      if (!current() || selection?.sessionId != session || draft?.userId != uid ||
+          draft?.routeId != state?.selectedRouteId || draft?.busNo != state?.selectedRouteNo ||
+          draft?.stopId != state?.selectedStopId) return null;
+      return draft;
+    }
+    _busGuide = PassengerBusGuide(lookup: lookup, current: current,
+        selectedRide: selectedRide, photoDemo: kDebugMode && SavedRideTrial.photoGuidance,
+        macs: (number) async {
+      final paired = await SharedPreferencesHardwareTestSettingsStore().loadBus();
+      if (paired?.routeNo == number) return {paired!.mac};
+      final configured = _demoBeaconMapping.identities
+          .where((entry) => entry.routeNo == number).map((entry) => entry.beaconId).toSet();
+      if (configured.isNotEmpty || _demoBeaconMapping.issue != null) return configured;
+      // The team phone demo uses target A for the synthetic saved 502 trial.
+      return kDebugMode && trial && number == '502' ? {'C3:00:00:5C:B9:47'} : {};
+    })..addListener(_guideChanged);
+    _priority.addListener(_syncGuidePriority);
+    _syncGuidePriority();
+    if (_audioForeground) _busGuide!.start();
+  }
   bool Function()? _safetySessionGuard;
   String? _safetySessionUid;
   final _safetyLifecycle = SessionSafetyLifecycle();
@@ -200,7 +284,29 @@ class _V3GuidancePageState extends State<V3GuidancePage>
 
   // 실시간 채팅 상태
   final List<ChatMessage> _chatMessages = [];
+  final _chatHistory = RouteChatHistoryStore();
+  List<SavedRouteChat> _savedChats = const [];
+  SavedRouteChat? _viewedChat;
+  int _historyRevision = 0;
+  String? _historyNotice;
+  bool _loadingHistory = false;
+  bool _changingConversation = false;
+  bool _sendingChat = false;
   bool _isChatOpen = false;
+
+  String? get _chatHistoryScope {
+    final uid = _auth.currentAccount?.uid;
+    if (!_isLiveMode || widget.visionOnly || !_speechAuthValid ||
+        uid == null || uid.isEmpty) {
+      return null;
+    }
+    return jsonEncode([uid, widget.localRuntime?.client.baseUrl ?? _apiBaseUrl, widget.dataMode]);
+  }
+
+  bool get _chatActionBusy =>
+      _isBusy || _isRoutePlanning || _changingConversation || _sendingChat ||
+      _cameraOpen || _isListening || _safetyLifecycle.resetting;
+
 
   // 경로 확정 시 실시간 내비 카드(지도)로 자동 스크롤하기 위한 키/컨트롤러.
   final ScrollController _bodyScrollController = ScrollController();
@@ -259,12 +365,14 @@ class _V3GuidancePageState extends State<V3GuidancePage>
       if (!authGuard()) {
         widget.sharedSession?.clear();
         _speechAuthValid = false;
+        _forgetChatView();
         _client.invalidateVisionSession(_sessionId);
         unawaited(_stopAllCueAudio().catchError((Object _) {}));
       }
     }, onError: (Object _) {
       widget.sharedSession?.clear();
       _speechAuthValid = false;
+      _forgetChatView();
       unawaited(_stopAllCueAudio().catchError((Object _) {}));
     });
     _voiceGuideService = VoiceGuideService();
@@ -294,8 +402,11 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!_androidAudio) return;
     _audioForeground = state == AppLifecycleState.resumed;
-    if (!_audioForeground) {
-      unawaited(observeAudioCleanup(_stopAllCueAudio,
+    if (_audioForeground) {
+      _busGuide?.start();
+    } else {
+      unawaited(_busGuide?.stop());
+      unawaited(observeAudioCleanup(() => _stopAllCueAudio(muteGuide: false),
           channel: 'Guidance background', report: debugPrint));
     }
   }
@@ -304,6 +415,8 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _audioForeground = false;
+    if (_busGuide != null) _priority.removeListener(_syncGuidePriority);
+    _busGuide?.dispose();
     _safetyLifecycle.dispose();
     _client.invalidateVisionSession(_sessionId);
     _speechScope.dispose();
@@ -354,10 +467,11 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     var frameIndex = 0;
     setState(() => _cameraOpen = true);
     try {
-      await _stopAllCueAudio();
+      await _stopAllCueAudio(muteGuide: false);
       if (!mounted || !current()) return;
       await Navigator.of(context).push(MaterialPageRoute<void>(
           builder: (_) => LocalVisionPage(
+                busGuide: _busGuide,
                 ownerUid: uid,
                 remoteApi: _client,
                 remoteSessionId: sessionId,
@@ -416,16 +530,55 @@ class _V3GuidancePageState extends State<V3GuidancePage>
       final uid = _auth.currentAccount?.uid;
       final health = await _client.fetchHealth();
       if (!mounted || !guard()) return;
-      final shared = widget.localRuntime == null && uid != null
-          ? widget.sharedSession
-          : null;
-      shared?.bind('$uid|$_apiBaseUrl|${widget.dataMode}');
+      final shared = uid == null ? null : widget.sharedSession;
+      shared?.bind('$uid|${_client.baseUrl}|${widget.dataMode}');
       _sharedGeneration = shared?.generation;
-      final session = shared == null
-          ? await _client.createSession(wakeWord: _wakeWord)
+      final trial = _savedTrial;
+      V3GuidanceState session;
+      RideRequestDraft? restoredDraft;
+      trial?.checkConfiguration(_apiBaseUrl);
+      final previous = shared?.state;
+      if (trial != null &&
+          (previous == null || previous.sessionId == SavedRideTrial.sessionId)) {
+        final saved = await trial.resume(_client, _auth, () =>
+            mounted && guard() && _sharedSessionCurrent && _auth.currentAccount?.uid == uid);
+        if (saved == null) return;
+        session = saved.state;
+        restoredDraft = saved.draft;
+      } else {
+        Future<V3GuidanceState> openInitial() async {
+          if (_singleSearchTrial && widget.visionOnly && uid != null) {
+            final store = RideCreationIntentStore();
+            final id = await store.activeRequest(uid);
+            final sid = id == null ? null : await store.sessionForActiveRequest(uid, id);
+            if (sid != null && id != null) {
+              if (!guard()) throw StateError('Guidance owner changed');
+              final result = await _rideApi.fetchRideRequestStatus(requestId: id);
+              if (!guard()) throw StateError('Guidance owner changed');
+              final ride = result.acceptedRide;
+              if (!result.isSuccess && result.httpStatus != 404) {
+                throw StateError('수락된 요청 상태를 확인할 수 없습니다.');
+              }
+              if (ride != null && ride.userId == uid && ride.requestId == id) {
+                final state = await _client.resumeSession(sessionId: sid);
+                if (!guard() || state.sessionId != sid || state.state != 'WAITING_FOR_BUS' ||
+                    state.selectedRouteId != ride.routeId || state.selectedRouteNo != ride.busNo ||
+                    state.selectedStopId != ride.stopId) {
+                  throw StateError('수락된 요청과 현재 안내 경로가 일치하지 않습니다.');
+                }
+                return state;
+              }
+            }
+          }
+          if (!guard()) throw StateError('Guidance owner changed');
+          return _client.createSession(wakeWord: _wakeWord);
+        }
+        session = shared == null
+          ? await openInitial()
           : await shared.open(
-              create: () => _client.createSession(wakeWord: _wakeWord),
+              create: openInitial,
               fetch: (id) => _client.resumeSession(sessionId: id));
+      }
       // Restore the route, never previous live status, cues, BLE or authority.
       _storedRoutePlan = shared?.routePlan;
       if (!mounted || !guard()) return;
@@ -435,7 +588,9 @@ class _V3GuidancePageState extends State<V3GuidancePage>
       setState(() {
         _healthStatus = health;
         _sessionState = session;
+        if (restoredDraft != null && !widget.visionOnly) _rideSelection?.restore(restoredDraft);
       });
+      _prepareAcceptedBusGuide();
       if (_androidAudio) {
         // Bootstrap happens once per successfully created session, never build().
         unawaited(_speakAgentMessage(widget.visionOnly
@@ -509,10 +664,193 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     return _sendUtteranceFromSource(utterance: utterance, fromChat: false);
   }
 
+  void _forgetChatView() {
+    if (!mounted) return;
+    setState(() {
+      _historyRevision++;
+      _chatMessages.clear();
+      _savedChats = const [];
+      _viewedChat = null;
+      _loadingHistory = false;
+      _isChatOpen = false;
+    });
+  }
+
+  void _openChat() {
+    if (!mounted || !_speechAuthValid) return;
+    setState(() {
+      _isChatOpen = true;
+      _viewedChat = null;
+    });
+    unawaited(_loadChatHistory());
+  }
+
+  Future<void> _loadChatHistory() async {
+    final scope = _chatHistoryScope;
+    if (scope == null || _loadingHistory) return;
+    final revision = ++_historyRevision;
+    final guard = _captureAuthGuard();
+    bool current() => mounted && guard() && _chatHistoryScope == scope &&
+        _historyRevision == revision;
+    setState(() => _loadingHistory = true);
+    try {
+      final saved = await _chatHistory.load(scope);
+      if (!current()) return;
+      setState(() {
+        _savedChats = saved;
+        _historyNotice = null;
+        // A still-live session may be shared when leaving/re-entering the
+        // route page. Restore only its transcript, never route authority.
+        if (_chatMessages.isEmpty) {
+          for (final entry in saved) {
+            if (entry.id == _sessionId) {
+              _chatMessages.addAll(entry.messages);
+              break;
+            }
+          }
+        }
+      });
+    } catch (_) {
+      if (current()) setState(() => _historyNotice = '최근 대화를 불러오지 못했습니다.');
+    } finally {
+      if (current()) setState(() => _loadingHistory = false);
+    }
+  }
+
+  void _saveRouteChat() {
+    final scope = _chatHistoryScope;
+    final id = _sessionId;
+    if (scope == null || id.isEmpty || !_captureAuthGuard()()) return;
+    final messages = _chatMessages
+        .where((message) => message.source == 'chat' && !message.isThinking)
+        .toList(growable: false);
+    if (!messages.any((message) => message.isUser)) return;
+    final revision = ++_historyRevision;
+    final guard = _captureAuthGuard();
+    final entry = SavedRouteChat(
+      id: id,
+      messages: messages,
+      updatedAt: messages.last.timestamp,
+    );
+    bool current() => mounted && guard() && _chatHistoryScope == scope &&
+        _historyRevision == revision;
+    unawaited(() async {
+      try {
+        final saved = await _chatHistory.save(scope, entry);
+        if (!current()) return;
+        setState(() {
+          _savedChats = saved;
+          _historyNotice = null;
+        });
+      } catch (_) {
+        if (current()) setState(() => _historyNotice = '대화를 이 기기에 저장하지 못했습니다.');
+      } finally {
+        if (current() && _loadingHistory) setState(() => _loadingHistory = false);
+      }
+    }());
+  }
+
+  void _openSavedChat(SavedRouteChat entry) {
+    if (_chatActionBusy || _chatHistoryScope == null ||
+        !_savedChats.contains(entry)) {
+      return;
+    }
+    setState(() => _viewedChat = entry.id == _sessionId ? null : entry);
+  }
+
+  Future<void> _newRouteChat() async {
+    final scope = _chatHistoryScope;
+    if (scope == null || _chatActionBusy) return;
+    final uid = _auth.currentAccount?.uid;
+    final guard = _captureAuthGuard();
+    final shared = widget.sharedSession;
+    var sharedGeneration = _sharedGeneration;
+    bool current() => mounted && guard() && _chatHistoryScope == scope &&
+        (shared == null ||
+            (sharedGeneration != null && shared.current(sharedGeneration!)));
+    if (!current()) return;
+    setState(() {
+      _changingConversation = true;
+      _isBusy = true;
+      _historyNotice = null;
+    });
+    final oldId = _sessionId;
+    String? unclaimedId;
+    try {
+      // The old conversation remains visible on a failed request. Asking the
+      // server to create (not reset) guarantees a separate dialogue context.
+      final fresh = await _client.createSession(wakeWord: _wakeWord);
+      if (fresh.sessionId.isEmpty || fresh.sessionId == oldId || fresh.state != 'IDLE') {
+        throw StateError('New chat did not receive a fresh idle session');
+      }
+      unclaimedId = fresh.sessionId;
+      if (!current()) return;
+      await _safetyLifecycle.reset(
+        isCurrent: current,
+        request: () async {
+          await _stopAllCueAudio();
+          if (!current()) throw const StaleAuthRequestException();
+          _client.invalidateVisionSession(oldId);
+          _stopLiveRoutePolling(clearStatus: true);
+          if (shared != null) {
+            _sharedGeneration = sharedGeneration = shared.startNewConversation(fresh);
+          }
+          setState(() {
+            _visionSpeechGeneration++;
+            _sessionId = fresh.sessionId;
+            _safetySessionGuard = guard;
+            _safetySessionUid = uid;
+            _lastRoutePlan = null;
+            _sessionState = fresh;
+            _lastAgentResponse = null;
+            _lastRouteRecommendation = null;
+            _lastArrivals = null;
+            _lastBeaconDecision = null;
+            _latestGeofenceMessage = null;
+            _routePlanningStatus = null;
+            _errorMessage = null;
+            _pendingNavPlan = null;
+            _pendingNavPosition = null;
+            _activatePendingNavAfterLiveExit = false;
+            _declinedRouteKey = null;
+            _navStopped = false;
+            _isAgentTraceExpanded = false;
+            _chatMessages.clear();
+            _viewedChat = null;
+          });
+          unclaimedId = null;
+        },
+      );
+    } catch (_) {
+      if (current()) setState(() => _historyNotice = '새 대화를 열지 못했습니다. 다시 시도해 주세요.');
+    } finally {
+      final unused = unclaimedId;
+      if (unused != null) _client.invalidateVisionSession(unused);
+      if (mounted) {
+        setState(() {
+          _changingConversation = false;
+          _isBusy = false;
+        });
+      }
+    }
+  }
+
   /// 채팅에서 보낸 메시지를 처리한다.
   Future<void> _sendChatMessage(String text) async {
-    if (text.trim().isEmpty) return;
-    await _sendUtteranceFromSource(utterance: text, fromChat: true);
+    if (text.trim().isEmpty || _chatActionBusy || _viewedChat != null ||
+        !_speechAuthValid || _sessionId.isEmpty) {
+      return;
+    }
+    setState(() => _sendingChat = true);
+    final sessionId = _sessionId;
+    try {
+      await _sendUtteranceFromSource(utterance: text, fromChat: true);
+    } finally {
+      if (mounted) {
+        if (sessionId == _sessionId) _saveRouteChat();
+        setState(() => _sendingChat = false);
+      }
+    }
   }
 
   Future<void> _toggleVoiceInput() async {
@@ -609,7 +947,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
 
     // 경로를 찾은 뒤 안내 시작 여부에 대한 응답을 먼저 해석한다.
     if (_pendingNavPlan != null) {
-      if (_isNavAffirmative(text)) {
+      if (!_isNavNegative(text) && (ConfirmedRideSelection.isConfirmation(text) || _isNavAffirmative(text))) {
         return const LiveProcessResult(
           spokenText: _navStartAcceptedMessage,
           navigateNow: true,
@@ -718,6 +1056,10 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   Future<void> _activatePendingNavPlanAfterLiveExit() async {
     if (!_activatePendingNavAfterLiveExit) return;
     _activatePendingNavAfterLiveExit = false;
+    if (widget.sharedSession != null && _pendingNavPlan != null) {
+      await _confirmShownRoute(fromChat: false);
+      return;
+    }
     final routePlan = _pendingNavPlan;
     final position = _pendingNavPosition;
     _pendingNavPlan = null;
@@ -761,6 +1103,16 @@ class _V3GuidancePageState extends State<V3GuidancePage>
           ),
         );
       });
+      if (fromChat) _saveRouteChat();
+    }
+
+    if (widget.sharedSession != null &&
+        (ConfirmedRideSelection.isConfirmation(text) ||
+            (_pendingNavPlan != null &&
+                _isNavAffirmative(text) &&
+                !_isNavNegative(text)))) {
+      await _confirmShownRoute(fromChat: fromChat);
+      return;
     }
 
     // 경로를 찾은 뒤 안내 시작 여부에 대한 사용자 응답을 먼저 해석한다.
@@ -835,7 +1187,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
             preparation: planningPreparation!,
             routePlan: routePlan,
           );
-        } else if (shouldPlanRoute && state.selectedDestination != null) {
+        } else if (!_singleSearchTrial && shouldPlanRoute && state.selectedDestination != null) {
           recommendation = await _client.routeRecommend(
             destination: state.selectedDestination!,
             originLat: planningPreparation?.position?.latitude,
@@ -896,6 +1248,10 @@ class _V3GuidancePageState extends State<V3GuidancePage>
           // 동의를 기다리는 동안에는 내비게이션을 활성화하지 않는다.
           _pendingNavPlan = routePlan;
           _pendingNavPosition = planningPreparation?.position;
+        } else if (autoStartNav && widget.sharedSession != null) {
+          _pendingNavPlan = routePlan;
+          _pendingNavPosition = planningPreparation?.position;
+          await _confirmRoute(fromChat: fromChat);
         } else if (autoStartNav) {
           _pendingNavPlan = null;
           _pendingNavPosition = null;
@@ -1255,11 +1611,15 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   }
 
   Future<_RoutePlanningPreparation> _beginRoutePlanning() async {
+    _invalidateRide();
+    _pendingNavPlan = null;
+    _pendingNavPosition = null;
     _routeRequestScope.invalidate();
     _liveRouteTimer?.cancel();
     _liveRouteTimer = null;
     setState(() {
       _isRoutePlanning = true;
+      _lastRoutePlan = null;
       _routePlanningStatus = _routePlanningMessage;
       _liveRoutePanelVisible = false;
       _liveStatus = null;
@@ -1318,6 +1678,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
       _isChatOpen = false;
     });
     _scrollToNavCard();
+    if (_singleSearchTrial) return; // The joint trial uses only the passenger's explicit queries.
     await _refreshNavStatus();
     _scrollToNavCard();
     if (!mounted || !_liveRoutePanelVisible || _navStopped) return;
@@ -1403,6 +1764,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   }
 
   void _acceptBetterRoute() {
+    _invalidateRide();
     final fresh = _betterRoutePlan;
     if (fresh == null) return;
     setState(() {
@@ -1487,6 +1849,9 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   /// '길찾기 중지': 지도/실시간 패널을 끄고 30초 폴링을 멈춘다.
   /// 새 목적지를 말하면 _activateLiveRoutePanel에서 다시 시작된다.
   void _stopNavigation() {
+    _invalidateRide();
+    _pendingNavPlan = null;
+    _pendingNavPosition = null;
     _routeRequestScope.invalidate();
     _liveRouteTimer?.cancel();
     _liveRouteTimer = null;
@@ -1685,7 +2050,12 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     );
   }
 
-  Future<void> _stopAllCueAudio() async {
+  Future<void> _stopAllCueAudio({bool muteGuide = true}) async {
+    if (!_speechAuthValid || !_sharedSessionCurrent) {
+      await _busGuide?.stop();
+    } else if (muteGuide) {
+      _busGuide?.mute(true);
+    }
     DescribedAction.cancelDescriptions();
     _speechScope.invalidate();
     _routeRequestScope.invalidate();
@@ -1982,7 +2352,52 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     return null;
   }
 
+  Future<void> _confirmShownRoute({required bool fromChat}) =>
+      _runGuarded(() => _confirmRoute(fromChat: fromChat));
+
+  Future<void> _confirmRoute({required bool fromChat}) async {
+      final route = _pendingNavPlan ?? _lastRoutePlan;
+      final plan = route?.recommendedPlan;
+      final uid = _auth.currentAccount?.uid;
+      final session = _sessionId;
+      bool current() =>
+          mounted &&
+          _sharedSessionCurrent &&
+          _speechAuthValid &&
+          _safetySessionGuard?.call() == true &&
+          _safetySessionUid == uid &&
+          _auth.currentAccount?.uid == uid &&
+          _sessionId == session;
+      if (!current() || uid == null) return;
+      if (route == null || plan == null) {
+        _invalidateRide();
+        throw const V3ApiException('먼저 안내할 경로를 검색해 주세요.');
+      }
+      final state = await _rideSelection!.confirm(
+          client: _client,
+          sessionId: session,
+          uid: uid,
+          wakeWord: _wakeWord,
+          mode: widget.dataMode,
+          expected: plan,
+          current: current);
+      if (state == null || !current()) return;
+      final position = _pendingNavPosition;
+      setState(() {
+        _sessionState = state;
+        _pendingNavPlan = null;
+        _pendingNavPosition = null;
+      });
+      _addAgentLog(_navStartAcceptedMessage, fromChat: fromChat);
+      unawaited(_speakAgentMessage(_navStartAcceptedMessage));
+      await _activateLiveRoutePanel(route, position);
+  }
+
   Future<void> _startGuidance() async {
+    if (widget.sharedSession != null) {
+      await _confirmShownRoute(fromChat: false);
+      return;
+    }
     await _playScriptLine('mock_start');
     await _sendUtterance('네, 선택한 경로로 안내해 주세요.');
   }
@@ -2092,6 +2507,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     final guard = _safetySessionGuard;
     bool current() => mounted && guard != null && guard();
     if (!current()) return;
+    _invalidateRide();
     await _runGuarded(() async {
       await _safetyLifecycle.reset(
           isCurrent: current,
@@ -2108,6 +2524,8 @@ class _V3GuidancePageState extends State<V3GuidancePage>
             _liveRouteTimer?.cancel();
             _liveRouteTimer = null;
             setState(() {
+              _pendingNavPlan = null;
+              _pendingNavPosition = null;
               _sessionState = state;
               _lastAgentResponse = null;
               _lastRouteRecommendation = null;
@@ -2141,10 +2559,51 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     final state = _sessionState;
     final lastMessage = _lastAgentResponse?.message ??
         _latestGeofenceMessage ??
-        _lastBeaconDecision?.message ??
-        'V3 버스 탑승 보조 에이전트가 대기 중이에요.';
+        _lastBeaconDecision?.message;
 
-    return ActionSpeechScope(
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final routeTheme = theme.copyWith(
+      iconButtonTheme: IconButtonThemeData(
+        style: IconButton.styleFrom(
+          foregroundColor: scheme.onSurface,
+          minimumSize: const Size.square(48),
+        ),
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: ButtonStyle(
+          foregroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.disabled)) {
+              return scheme.outlineVariant;
+            }
+            return states.contains(WidgetState.selected)
+                ? scheme.onPrimary
+                : scheme.onSurface;
+          }),
+          backgroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.disabled)) {
+              return scheme.surfaceContainerHighest;
+            }
+            return states.contains(WidgetState.selected)
+                ? scheme.primary
+                : scheme.surface;
+          }),
+          side: WidgetStatePropertyAll(BorderSide(color: scheme.outline)),
+          minimumSize: const WidgetStatePropertyAll(Size(48, 48)),
+        ),
+      ),
+      chipTheme: theme.chipTheme.copyWith(
+        backgroundColor: scheme.surface,
+        disabledColor: scheme.surfaceContainerHighest,
+        side: BorderSide(color: scheme.outline),
+        labelStyle: theme.textTheme.labelLarge?.copyWith(
+          color: scheme.onSurface,
+        ),
+      ),
+    );
+    return Theme(
+      data: widget.visionOnly ? theme : routeTheme,
+      child: ActionSpeechScope(
         speech: _priority,
         child: Scaffold(
           appBar: AppBar(
@@ -2208,7 +2667,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
           floatingActionButton: widget.visionOnly || _isLiveMode || _isChatOpen
               ? null
               : FloatingActionButton.extended(
-                  onPressed: () => setState(() => _isChatOpen = true),
+                  onPressed: _openChat,
                   icon: const Icon(Icons.chat_bubble_outline),
                   label: const Text('채팅'),
                   tooltip: '실시간 채팅 열기',
@@ -2222,8 +2681,31 @@ class _V3GuidancePageState extends State<V3GuidancePage>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (state?.selectedRouteNo != null)
-                        Text('선택한 노선: ${state!.selectedRouteNo}번 · ${state.selectedStopName ?? state.selectedStopId ?? "정류장 미확인"}'),
+                      if (widget.visionOnly && _busGuide?.busNo != null)
+                        Text('${_busGuide!.usingSelection ? "안내 노선" : "수락된 버스"}: ${_busGuide!.busNo}번'),
+                      if (!widget.visionOnly &&
+                          _rideSelection != null &&
+                          _sessionId.isNotEmpty) ...[
+                        if (_isLiveMode &&
+                            _lastRoutePlan?.recommendedPlan != null &&
+                            _rideSelection?.value == null)
+                          DescribedAction.button(
+                              label: '이 경로로 안내 시작',
+                              description: '선택한 경로로 버스 안내를 시작합니다.',
+                              child: FilledButton.icon(
+                                  onPressed: _isBusy ? null : _startGuidance,
+                                  icon: const Icon(Icons.navigation),
+                                  label: const Text('이 경로로 안내 시작'))),
+                        if (_savedTrial == null || _inSavedTrial)
+                          RideRequestPanel.confirmed(
+                              key: ValueKey(_sessionId),
+                              guidanceSessionId: _sessionId,
+                              compact: true,
+                              api: _rideApi,
+                              session: _auth,
+                              store: _savedTrial,
+                              selection: _rideSelection!),
+                      ],
                       if (widget.visionOnly) ...[
                         const Text(
                             '카메라로 객체를 감지하고 연결된 서버에 결과를 전송합니다. 화면 기준 방향 음향은 실제 이동 안전을 보장하지 않습니다.'),
@@ -2247,7 +2729,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
                                 label: const Text('카메라 시작'),
                               )),
                         ),
-                      if (_androidAudio)
+                      if (_androidAudio && (widget.visionOnly || widget.localRuntime != null))
                         Padding(
                           padding: const EdgeInsets.only(bottom: 12),
                           child: Wrap(spacing: 8, runSpacing: 8, children: [
@@ -2337,6 +2819,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
                       if (!widget.visionOnly) ...[
                         _HeroStatusCard(
                           isBusy: _isBusy,
+                          savedTrial: _inSavedTrial,
                           stateLabel: state?.state ?? 'LOADING',
                           destination: state?.selectedDestination,
                           routeNo: state?.selectedRouteNo,
@@ -2351,8 +2834,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
                             isBusy: _isBusy,
                             isListening: _isListening,
                             voiceStatusMessage: _voiceStatusMessage,
-                            onOpenChat: () =>
-                                setState(() => _isChatOpen = true),
+                            onOpenChat: _openChat,
                             onToggleVoice: _toggleVoiceInput,
                           ),
                           if (_chatMessages.isNotEmpty) ...[
@@ -2515,8 +2997,19 @@ class _V3GuidancePageState extends State<V3GuidancePage>
                 if (_isChatOpen)
                   Positioned.fill(
                     child: ChatOverlay(
-                      messages: _chatMessages,
-                      isBusy: _isBusy,
+                      messages: _viewedChat?.messages ?? _chatMessages,
+                      isBusy: _chatActionBusy,
+                      savedChats: _savedChats,
+                      historyBusy: _loadingHistory || _chatActionBusy,
+                      historyNotice: _historyNotice,
+                      canSendMessage: _sessionId.isNotEmpty,
+                      activeChatId: _viewedChat?.id ?? _sessionId,
+                      viewingSavedChat: _viewedChat != null,
+                      onNewChat: _chatHistoryScope == null ? null : _newRouteChat,
+                      onOpenSavedChat: _chatHistoryScope == null ? null : _openSavedChat,
+                      onReturnToCurrentChat: _viewedChat == null
+                          ? null
+                          : () => setState(() => _viewedChat = null),
                       onSendMessage: _sendChatMessage,
                       onClose: () => setState(() => _isChatOpen = false),
                     ),
@@ -2524,7 +3017,9 @@ class _V3GuidancePageState extends State<V3GuidancePage>
               ],
             ),
           ),
-        ));
+        ),
+      ),
+    );
   }
 }
 
@@ -2544,9 +3039,7 @@ class _AgentTraceCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      color: Theme.of(
-        context,
-      ).colorScheme.primaryContainer.withValues(alpha: 0.35),
+      color: Colors.white,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -2684,17 +3177,18 @@ IconData _agentTraceIcon(String status) {
 
 Color _agentTraceColor(BuildContext context, String status) {
   return switch (status) {
-    'DONE' => Colors.green,
+    'DONE' => const Color(0xFF111111),
     'FAILED' => Theme.of(context).colorScheme.error,
-    'SKIPPED' => Colors.grey,
-    'RUNNING' => Colors.orange,
-    _ => Colors.blueGrey,
+    'SKIPPED' => const Color(0xFF555555),
+    'RUNNING' => const Color(0xFF111111),
+    _ => const Color(0xFF111111),
   };
 }
 
 class _HeroStatusCard extends StatelessWidget {
   const _HeroStatusCard({
     required this.isBusy,
+    required this.savedTrial,
     required this.stateLabel,
     required this.message,
     this.destination,
@@ -2705,8 +3199,9 @@ class _HeroStatusCard extends StatelessWidget {
   });
 
   final bool isBusy;
+  final bool savedTrial;
   final String stateLabel;
-  final String message;
+  final String? message;
   final String? destination;
   final String? routeNo;
   final String? stopName;
@@ -2715,9 +3210,29 @@ class _HeroStatusCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final shortState = switch (stateLabel) {
+      'LOADING' => '연결 중',
+      'IDLE' => '대기 중',
+      'ROUTE_RECOMMENDED' => '추천 경로 확인',
+      'ROUTE_SELECTED' => '경로 선택 완료',
+      'NAVIGATING_TO_STOP' => '정류장으로 이동 중',
+      'ARRIVED_AT_STOP' => '정류장 도착',
+      'WAITING_FOR_BUS' => '버스 대기 중',
+      'BOARDING_CONFIRMATION' => '탑승 확인 중',
+      'BOARDED' => '탑승 완료',
+      'MISSED_BUS' => '버스를 놓침',
+      'REPLAN_NEXT_BUS' => '다음 버스 확인 중',
+      _ => stateLabel,
+    };
+    final details = [
+      if (routeNo != null) '노선: $routeNo${savedTrial ? ' (저장된 모의 경로)' : ''}',
+      if (stopName != null) '정류장: $stopName',
+      if (destination != null) '목적지: $destination',
+      if (targetBusId != null) '타깃 버스: $targetBusId',
+    ];
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2725,16 +3240,19 @@ class _HeroStatusCard extends StatelessWidget {
               children: [
                 Icon(isBusy ? Icons.hourglass_top : Icons.directions_bus),
                 const SizedBox(width: 8),
-                Text(
-                  '상태: $stateLabel',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                Expanded(
+                  child: Text(
+                    '안내 상태 · $shortState',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.bold),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 10),
-            Text(message, style: Theme.of(context).textTheme.bodyLarge),
+            if (message?.trim().isNotEmpty == true) ...[
+              const SizedBox(height: 8),
+              Text(message!, style: Theme.of(context).textTheme.bodyMedium),
+            ],
             if (errorMessage != null) ...[
               const SizedBox(height: 8),
               Semantics(
@@ -2745,17 +3263,12 @@ class _HeroStatusCard extends StatelessWidget {
               const Text(
                   '연결 오류라면 인터넷과 서버 상태를 확인한 뒤 상단의 서버 다시 연결 또는 상태 새로고침을 눌러 주세요.'),
             ],
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _InfoChip(label: '목적지', value: destination ?? '-'),
-                _InfoChip(label: '노선', value: routeNo ?? '-'),
-                _InfoChip(label: '정류장', value: stopName ?? '-'),
-                _InfoChip(label: '타깃 버스', value: targetBusId ?? '-'),
-              ],
-            ),
+            if (details.isNotEmpty) const SizedBox(height: 4),
+            for (final detail in details)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(detail, style: Theme.of(context).textTheme.bodyMedium),
+              ),
           ],
         ),
       ),
@@ -2808,18 +3321,6 @@ class _MockScenarioSimulationCard extends StatelessWidget {
   }
 }
 
-class _InfoChip extends StatelessWidget {
-  const _InfoChip({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Chip(label: Text('$label: $value'));
-  }
-}
-
 class _LocationNeededBanner extends StatelessWidget {
   const _LocationNeededBanner({this.onRetry, this.detail});
 
@@ -2829,7 +3330,7 @@ class _LocationNeededBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      color: Theme.of(context).colorScheme.errorContainer,
+      color: Colors.white,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -2913,9 +3414,7 @@ class _ConversationLogCard extends StatelessWidget {
                     child: Text(
                       m.text,
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.5,
-                        ),
+                        color: theme.colorScheme.onSurface,
                         fontStyle: FontStyle.italic,
                       ),
                     ),
@@ -2936,9 +3435,8 @@ class _ConversationLogCard extends StatelessWidget {
                       vertical: 8,
                     ),
                     decoration: BoxDecoration(
-                      color: isUser
-                          ? theme.colorScheme.primaryContainer
-                          : theme.colorScheme.surfaceContainerHighest,
+                      color: Colors.white,
+                      border: Border.all(color: const Color(0xFF111111)),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Column(
@@ -3001,7 +3499,7 @@ class _LiveQuestionMethodsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return Card(
-      color: colorScheme.primaryContainer.withValues(alpha: 0.36),
+      color: Colors.white,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -3093,7 +3591,7 @@ class _BetterRouteCard extends StatelessWidget {
     final routeNo = seg?.routeNo ?? '새 경로';
     final etaText = etaMinutes == null ? '' : ' · 약 $etaMinutes분';
     return Card(
-      color: theme.colorScheme.tertiaryContainer,
+      color: Colors.white,
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Column(
@@ -3156,7 +3654,7 @@ class _NavStoppedNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      color: Colors.white,
       child: const Padding(
         padding: EdgeInsets.all(16),
         child: Text('경로 안내를 취소했어요. 보행 내비게이션과 탑승 버스 상세 정보 갱신을 종료했어요.'),
@@ -3240,9 +3738,7 @@ class _RealtimeNavCard extends StatelessWidget {
       container: true,
       label: '실시간 길찾기 패널',
       child: Card(
-        color: Theme.of(
-          context,
-        ).colorScheme.secondaryContainer.withValues(alpha: 0.35),
+        color: Colors.white,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -3514,35 +4010,37 @@ class _RealtimeNavCard extends StatelessWidget {
                 points: walkPolyline
                     .map((p) => LatLng(p.latitude, p.longitude))
                     .toList(),
-                color: Colors.green,
+                color: const Color(0xFF111111),
                 strokeWidth: 4.0,
               ),
             ],
           ),
         MarkerLayer(
           markers: markers.map((m) {
-            final color = _liveRouteColor(m.type);
-            final radius = m.type == 'BUS'
-                ? 10.0
-                : m.type == 'NEARBY'
-                    ? 6.0
-                    : 8.0;
             return Marker(
               point: LatLng(m.latitude, m.longitude),
-              width: radius * 2,
-              height: radius * 2,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 1.5),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black26,
-                      blurRadius: 3.0,
-                      offset: const Offset(0, 1),
+              width: 36,
+              height: 36,
+              child: Semantics(
+                label: _liveRouteLabel(m.type),
+                child: Tooltip(
+                  message: _liveRouteLabel(m.type),
+                  excludeFromSemantics: true,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF111111),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 1.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black26,
+                          blurRadius: 3.0,
+                          offset: const Offset(0, 1),
+                        ),
+                      ],
                     ),
-                  ],
+                    child: Icon(_liveRouteIcon(m.type), color: Colors.white, size: 22),
+                  ),
                 ),
               ),
             );
@@ -3783,9 +4281,9 @@ class _CompactJourneyCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const background = Color(0xFF1D1D1F);
-    const muted = Color(0xFFB0B0B5);
-    const blue = Color(0xFF4385FF);
+    const background = Color(0xFFFFFFFF);
+    const muted = Color(0xFF111111);
+    const blue = Color(0xFF111111);
     final ridesSum = segments.fold<int>(
       0,
       (sum, s) => sum + (s.estimatedMinutes ?? 0),
@@ -3828,17 +4326,18 @@ class _CompactJourneyCard extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: background,
+        border: Border.all(color: const Color(0xFF111111), width: 1.5),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: DefaultTextStyle(
-          style: const TextStyle(color: Colors.white, height: 1.35),
+          style: const TextStyle(color: Color(0xFF111111), height: 1.35),
           child: Theme(
             data: Theme.of(context).copyWith(
               dividerColor: Colors.transparent,
-              splashColor: Colors.white10,
-              highlightColor: Colors.white10,
+              splashColor: Colors.black12,
+              highlightColor: Colors.black12,
             ),
             child: ExpansionTile(
               tilePadding: EdgeInsets.zero,
@@ -3888,7 +4387,7 @@ class _CompactJourneyCard extends StatelessWidget {
                         ? '총 소요 시간 확인 중'
                         : _durationLabel(totalMinutes!),
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: Color(0xFF111111),
                       fontSize: 32,
                       fontWeight: FontWeight.bold,
                     ),
@@ -3900,7 +4399,7 @@ class _CompactJourneyCard extends StatelessWidget {
                     ),
                   const SizedBox(height: 14),
                   _JourneyTimeline(legs: legs),
-                  const Divider(height: 28, color: Color(0xFF3B3B3F)),
+                  const Divider(height: 28, color: Color(0xFF111111)),
                   for (var i = 0; i < segments.length; i++) ...[
                     _BusLegRow(
                       routeNo: segments[i].routeNo,
@@ -4004,8 +4503,8 @@ class _JourneyDetail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const muted = Color(0xFFB0B0B5);
-    const divider = Color(0xFF3B3B3F);
+    const muted = Color(0xFF111111);
+    const divider = Color(0xFF111111);
     final rows = <Widget>[];
     var cursor = startTime;
     final accessMinutes = walkToBoardMinutes ?? 0;
@@ -4143,8 +4642,8 @@ class _DetailStep extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const muted = Color(0xFFB0B0B5);
-    const blue = Color(0xFF4385FF);
+    const muted = Color(0xFF111111);
+    const blue = Color(0xFF111111);
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
       child: Row(
@@ -4175,7 +4674,7 @@ class _DetailStep extends StatelessWidget {
                 Text(
                   title,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: Color(0xFF111111),
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -4231,15 +4730,15 @@ class _JourneyTimeline extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
-        height: 28,
+        height: (28 * MediaQuery.textScalerOf(context).scale(1)).clamp(28.0, 84.0).toDouble(),
         child: Row(
           children: [
             for (final leg in legs)
               _TimelineSegment(
                 flex: leg.minutes.clamp(1, 90),
                 color: leg.walk
-                    ? const Color(0xFF55585D)
-                    : const Color(0xFF3974F3),
+                    ? const Color(0xFF555555)
+                    : const Color(0xFF111111),
                 icon: leg.walk
                     ? Icons.directions_walk
                     : Icons.directions_bus_filled,
@@ -4284,9 +4783,9 @@ class _BusLegRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const muted = Color(0xFFB0B0B5);
-    const blue = Color(0xFF4385FF);
-    const orange = Color(0xFFFF6B55);
+    const muted = Color(0xFF111111);
+    const blue = Color(0xFF111111);
+    const orange = Color(0xFF111111);
     final stops = (stopCount != null && stopCount! > 0)
         ? '$stopCount개 정류장'
         : (remainingStops != null ? '$remainingStops정류장 전' : '');
@@ -4307,7 +4806,7 @@ class _BusLegRow extends StatelessWidget {
               Text(
                 routeNo,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: Color(0xFF111111),
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
                 ),
@@ -4365,7 +4864,7 @@ class _TransferRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const muted = Color(0xFFB0B0B5);
+    const muted = Color(0xFF111111);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -4445,7 +4944,7 @@ class _LiveRouteLegend extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(Icons.circle, color: _liveRouteColor(type), size: 12),
+        Icon(_liveRouteIcon(type), color: const Color(0xFF111111), size: 20),
         const SizedBox(width: 4),
         Text(_liveRouteLabel(type)),
       ],
@@ -4453,14 +4952,14 @@ class _LiveRouteLegend extends StatelessWidget {
   }
 }
 
-Color _liveRouteColor(String type) {
+IconData _liveRouteIcon(String type) {
   return switch (type) {
-    'USER' => Colors.indigo,
-    'BOARD_STOP' => Colors.green,
-    'ALIGHT_STOP' => Colors.orange,
-    'BUS' => Colors.red,
-    'NEARBY' => Colors.blueGrey,
-    _ => Colors.purple,
+    'USER' => Icons.person,
+    'BOARD_STOP' => Icons.login,
+    'ALIGHT_STOP' => Icons.logout,
+    'BUS' => Icons.directions_bus_filled,
+    'NEARBY' => Icons.location_on,
+    _ => Icons.flag,
   };
 }
 
@@ -5001,7 +5500,7 @@ class _RoutePlanCard extends StatelessWidget {
       label: '구조화된 버스 경로 계획, $typeLabel',
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: colorScheme.primaryContainer.withValues(alpha: 0.35),
+          color: Colors.white,
           border: Border.all(color: colorScheme.primary, width: 1.5),
           borderRadius: BorderRadius.circular(16),
         ),
@@ -5128,7 +5627,7 @@ class _PublicStopCatalogEvidenceCard extends StatelessWidget {
       label: '실제 공공 API 정류소 증빙, ${evidence.stopName}',
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: colorScheme.primaryContainer.withValues(alpha: 0.42),
+          color: Colors.white,
           border: Border.all(color: colorScheme.primary, width: 1.5),
           borderRadius: BorderRadius.circular(16),
         ),
@@ -5191,7 +5690,7 @@ class _MapsEvidenceCard extends StatelessWidget {
       label: 'Google Maps 최신 위치 정보 증빙',
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: colorScheme.secondaryContainer.withValues(alpha: 0.45),
+          color: Colors.white,
           border: Border.all(color: colorScheme.secondary),
           borderRadius: BorderRadius.circular(16),
         ),
@@ -5246,7 +5745,7 @@ class _PublicDataEvidenceCard extends StatelessWidget {
       label: '버스 도착 정보 증빙, $sourceLabel',
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: accentColor.withValues(alpha: 0.08),
+          color: Colors.white,
           border: Border.all(color: accentColor, width: 1.5),
           borderRadius: BorderRadius.circular(16),
         ),

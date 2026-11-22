@@ -5,6 +5,7 @@ import 'direction_audio_panel.dart';
 import 'obstacle_cue_input.dart';
 
 import 'diagnostic_action_hint.dart';
+import 'diagnostic_button_label.dart';
 
 /// Local synthetic producers only. No camera, BLE scanner or server writes.
 class SafetyIntegrationCheckPage extends StatefulWidget {
@@ -90,7 +91,7 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
         appBar: AppBar(title: const Text('안전 중단·재개 통합 점검')),
         body: ListView(padding: const EdgeInsets.all(16), children: [
           const Text('모의 입력 전용 · 실제 카메라/비콘/위험 판단 아님',
-              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+              style: TextStyle(fontWeight: FontWeight.bold)),
           const Text('이어폰 출력은 실제입니다. 제자리에서 시험하세요. 서버와 Guidance에 전송하지 않습니다. '
               '방향·센서·RSSI도 모의값입니다. 기존 TTL과 수동 재시작 정책을 사용합니다.'),
           Text(
@@ -120,7 +121,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                               _beaconStream = true;
                               _action = '새 비콘 수신 중. 유효 관측도 필요하며 자동 시작하지 않습니다.';
                             }),
-                    child: const Text('새 비콘 수신 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.sensors, '새 비콘 수신 (모의)'))),
             DiagnosticActionHint(
                 hint: '실제 센서 신호가 아닌 모의 상태를 설정합니다.',
                 child: OutlinedButton(
@@ -133,7 +135,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                               _hazardAt = _now;
                               _action = '고위험 경고 선점을 확인하세요. 비콘은 이전 값으로 고정했습니다.';
                             }),
-                    child: const Text('고위험 발생 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.warning_amber_rounded, '고위험 발생 (모의)'))),
             DiagnosticActionHint(
                 hint: '실제 센서 신호가 아닌 모의 상태를 설정합니다.',
                 child: OutlinedButton(
@@ -144,7 +147,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                               _beaconStream = false;
                               _action = '위험 해제. 과거 비콘으로 재개되면 실패입니다.';
                             }),
-                    child: const Text('위험 해제 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.check_circle_outline, '위험 해제 (모의)'))),
             DiagnosticActionHint(
                 hint: '실제 센서 신호가 아닌 모의 상태를 설정합니다.',
                 child: OutlinedButton(
@@ -155,7 +159,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                               _beaconAt = _oldBeaconAt;
                               _action = '위험 이전 비콘 시각 재사용. 시작이 차단되어야 합니다.';
                             }),
-                    child: const Text('과거 비콘 재사용 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.history, '과거 비콘 재사용 (모의)'))),
             DiagnosticActionHint(
                 hint: '실제 센서 신호가 아닌 모의 상태를 설정합니다.',
                 child: OutlinedButton(
@@ -163,7 +168,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                           _beaconStream = false;
                           _action = '비콘 새 수신 중지. 기존 TTL 만료 후 중단을 확인하세요.';
                         }),
-                    child: const Text('비콘 신호 상실 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.sensors_off, '비콘 신호 상실 (모의)'))),
             DiagnosticActionHint(
                 hint: '실제 센서 신호가 아닌 모의 상태를 설정합니다.',
                 child: OutlinedButton(
@@ -174,7 +180,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                               _beaconStream = false;
                               _action = '카메라 입력 상실. 위험 해제로 처리하면 안 됩니다.';
                             }),
-                    child: const Text('카메라 입력 상실 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.videocam_off_outlined, '카메라 입력 상실 (모의)'))),
             DiagnosticActionHint(
                 hint: '실제 센서 신호가 아닌 모의 상태를 설정합니다.',
                 child: OutlinedButton(
@@ -184,7 +191,8 @@ class _SafetyIntegrationCheckPageState extends State<SafetyIntegrationCheckPage>
                               _camera = true;
                               _action = '새 카메라 관측 복구. 위험 상태는 유지하며 새 비콘도 필요합니다.';
                             }),
-                    child: const Text('카메라 입력 복구 (모의)'))),
+                    child: const DiagnosticButtonLabel(
+                        Icons.videocam_outlined, '카메라 입력 복구 (모의)'))),
           ]),
           Text(_action),
           const Divider(),

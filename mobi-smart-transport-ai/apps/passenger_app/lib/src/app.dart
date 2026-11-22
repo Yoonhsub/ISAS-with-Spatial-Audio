@@ -191,6 +191,7 @@ class _MobiAppState extends State<MobiApp> {
       );
     } else {
       home = HomePage(
+        rideSelection: _guidanceSession.rideSelection,
         agentName: agentName,
         onEditAgentName: _resetAgentName,
         onReturnToModeSelection: _resetToModeSelection,
@@ -240,7 +241,8 @@ class _MobiAppState extends State<MobiApp> {
                           requiredRole: 'passenger',
                           session: widget.authSession,
                           appLabel: 'MOBI 승객 앱',
-                          builder: (context, account) => home,
+                          builder: (context, account) => KeyedSubtree(
+                              key: ValueKey(account.uid), child: home),
                         ),
             )
           : protectAndroid((context) => PassengerLanding(
@@ -272,6 +274,7 @@ class _MobiAppState extends State<MobiApp> {
               session: widget.authSession,
               appLabel: 'MOBI 장애물 탐지',
               builder: (context, account) => V3GuidancePage(
+                key: ValueKey(account.uid),
                 sharedSession: _guidanceSession,
                 agentName: agentName ?? '모비',
                 onReturnToModeSelection: _resetToModeSelection,
@@ -301,6 +304,7 @@ class _MobiAppState extends State<MobiApp> {
               session: widget.authSession,
               appLabel: 'MOBI 승객 앱',
               builder: (context, account) => V3GuidancePage(
+                key: ValueKey(account.uid),
                 sharedSession: _guidanceSession,
                 agentName: agentName ?? '모비',
                 onReturnToModeSelection: _resetToModeSelection,

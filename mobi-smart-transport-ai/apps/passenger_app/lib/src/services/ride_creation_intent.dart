@@ -29,6 +29,33 @@ class RideCreationIntentStore {
     }
   }
 
+  String _sessionSlot(String uid, String sessionId) =>
+      '${_activeSlot(uid)}.session.${Uri.encodeComponent(sessionId)}';
+
+  Future<void> bindSession(String uid, String sessionId, String requestId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!await prefs.setString(_sessionSlot(uid, sessionId), requestId)) {
+      throw StateError('안내 세션에 요청을 연결하지 못했습니다.');
+    }
+  }
+
+  Future<String?> sessionRequest(String uid, String sessionId) async {
+    final active = await activeRequest(uid);
+    final prefs = await SharedPreferences.getInstance();
+    return active != null && prefs.getString(_sessionSlot(uid, sessionId)) == active
+        ? active : null;
+  }
+
+  Future<String?> sessionForActiveRequest(String uid, String requestId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    if (prefs.getString(_activeSlot(uid)) != requestId) return null;
+    final prefix = '${_activeSlot(uid)}.session.';
+    final keys = prefs.getKeys().where(
+        (key) => key.startsWith(prefix) && prefs.getString(key) == requestId);
+    return keys.length == 1 ? keys.single.substring(prefix.length) : null;
+  }
+
   Future<String> begin(RideRequestDraft draft) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();

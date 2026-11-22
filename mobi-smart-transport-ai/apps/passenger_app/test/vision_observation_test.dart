@@ -40,6 +40,99 @@ void main() {
         false);
   });
 
+  test('camera stop awaits a delayed 204 without a second DELETE', () async {
+    final transport = PhoneTestTransport()..stopDelay = const Duration(milliseconds: 2200);
+    final api = leaseClient(LeaseTestLogin(), transport, enabled: false);
+    final binding = await api.startPassengerCamera('s');
+    api.invalidateVisionSession('s');
+    await api.stopPassengerCamera(binding);
+    expect(transport.stops, 1);
+  });
+
+  test('camera stop waits for the same login transport to drain', () async {
+    final transport = PhoneTestTransport()..uploadGate = Completer<void>();
+    final api = leaseClient(LeaseTestLogin(), transport, enabled: false);
+    final binding = await api.startPassengerCamera('s');
+    final upload = api.sendPassengerCamera(binding, {'frameId':'f'}, 0);
+    await Future<void>.delayed(Duration.zero);
+    api.invalidateVisionSession('s');
+    final stop = api.stopPassengerCamera(binding);
+    expect(transport.stops, 0);
+    transport.uploadGate!.complete();
+    await upload;
+    await stop;
+    expect(transport.stops, 1);
+  });
+
+  test('a pending camera stop cannot use a replacement login', () async {
+    final login = LeaseTestLogin();
+    final transport = PhoneTestTransport()..uploadGate = Completer<void>();
+    final api = leaseClient(login, transport, enabled: false);
+    final binding = await api.startPassengerCamera('s');
+    final upload = api.sendPassengerCamera(binding, {'frameId': 'f'}, 0);
+    final uploadDenied = expectLater(upload, throwsA(isA<VisionLeaseException>()));
+    await Future<void>.delayed(Duration.zero);
+    api.invalidateVisionSession('s');
+    final stopDenied = expectLater(api.stopPassengerCamera(binding),
+        throwsA(isA<VisionLeaseException>().having((e) => e.terminal, 'terminal', true)));
+    login.login();
+    transport.uploadGate!.complete();
+    await Future.wait([uploadDenied, stopDenied]);
+    expect(transport.stops, 0);
+  });
+
+  test('unconfirmed DELETE is not reported as a successful camera release', () async {
+    for (final status in [200, 403, 503]) {
+      final transport = PhoneTestTransport()..stopStatus = status;
+      final api = leaseClient(LeaseTestLogin(), transport, enabled: false);
+      final binding = await api.startPassengerCamera('s');
+      api.invalidateVisionSession('s');
+      await expectLater(api.stopPassengerCamera(binding), throwsA(
+          isA<VisionLeaseException>().having((e) => e.statusCode, 'status', status)));
+      expect(transport.stops, 1);
+    }
+  });
+
+  test('camera release timeout remains unconfirmed and sends one DELETE', () async {
+    final transport = PhoneTestTransport()..stopGate = Completer<void>();
+    final api = leaseClient(LeaseTestLogin(), transport, enabled: false);
+    final binding = await api.startPassengerCamera('s');
+    api.invalidateVisionSession('s');
+    try {
+      await expectLater(api.stopPassengerCamera(binding), throwsA(isA<VisionLeaseException>()
+          .having((e) => e.diagnosticCode, 'diagnostic', '서버 응답 시간 초과')));
+      expect(transport.stops, 1);
+    } finally {
+      transport.stopGate!.complete();
+      await Future<void>.delayed(Duration.zero);
+    }
+  });
+
+  test('phone camera 422 exposes only a safe validation category and closes the vision session', () async {
+    final transport = PhoneTestTransport();
+    final api = leaseClient(LeaseTestLogin(), transport, enabled: false);
+    final binding = await api.startPassengerCamera('s');
+    transport.validationError = {
+      'detail': [
+        {
+          'loc': ['body', 'detectionResult'],
+          'msg': 'Value error, Invalid DetectionResult contract',
+          'input': {'privatePayload': 'do not print'},
+        },
+      ],
+    };
+    await expectLater(
+      api.sendPassengerCamera(binding, {}, 0),
+      throwsA(isA<VisionLeaseException>()
+          .having((e) => e.terminal, 'terminal', true)
+          .having((e) => e.diagnosticCode, 'diagnostic',
+              'HTTP 422 · 객체 인식 결과 형식')),
+    );
+    await expectLater(api.startPassengerCamera('s'),
+        throwsA(isA<VisionLeaseException>()));
+    expect(transport.uploads, 1);
+  });
+
   test('camera setup outage does not block ordinary Guidance', () async {
     final login = LeaseTestLogin();
     final transport = LeaseTestTransport()..status = 503;
@@ -778,6 +871,10 @@ void leaseNegotiationTests() {
 
 class PhoneTestTransport extends LeaseTestTransport {
   int uploads = 0, stops = 0;
+  Duration stopDelay = Duration.zero;
+  Completer<void>? uploadGate, stopGate;
+  int stopStatus = 204;
+  Map<String, dynamic>? validationError;
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     if (!request.url.path.contains('/phone-camera')) return super.send(request);
@@ -795,6 +892,7 @@ class PhoneTestTransport extends LeaseTestTransport {
     Map<String, dynamic> result = binding;
     if (request.url.path.endsWith('/events')) {
       uploads++;
+      await uploadGate?.future;
       final body = jsonDecode((request as http.Request).body) as Map;
       expect(body['sourceType'], 'android_camera');
       expect(body['producerId'], 'owner');
@@ -805,9 +903,15 @@ class PhoneTestTransport extends LeaseTestTransport {
         'bindingId': binding['bindingId']
       };
       status = 202;
+      if (validationError case final error?) {
+        status = 422;
+        result = error;
+      }
     } else if (request.method == 'DELETE') {
       stops++;
-      status = 204;
+      if (stopDelay != Duration.zero) await Future<void>.delayed(stopDelay);
+      await stopGate?.future;
+      status = stopStatus;
     }
     return http.StreamedResponse(
         Stream.value(utf8.encode(status == 204 ? '' : jsonEncode(result))),

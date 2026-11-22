@@ -14,6 +14,14 @@ import 'native_android_audio_test.dart' as native;
 import 'vision_observation_tts_test.dart' as speech;
 
 void main() {
+  test('unconfirmed camera release is distinct from a camera failure', () {
+    expect(cameraStatusLabel(ready: true, cleanupIssue: '해제 미확인'),
+        '카메라 중지됨 · 서버 해제 미확인');
+    expect(cameraStatusLabel(ready: false, cleanupIssue: '해제 미확인'),
+        '카메라 상태: 오류');
+    expect(cameraStatusLabel(ready: true, cleanupIssue: null), '카메라 상태: 준비 완료');
+  });
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
   });

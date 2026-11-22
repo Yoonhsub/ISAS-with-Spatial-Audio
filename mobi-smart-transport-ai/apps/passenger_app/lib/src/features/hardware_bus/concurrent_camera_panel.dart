@@ -13,13 +13,17 @@ import '../../services/speech_priority_coordinator.dart';
 import '../../services/vision_scene_summary.dart';
 import '../../services/vision_screen_audio.dart';
 import '../../services/head_tracking_direction.dart';
+import 'door_beacon_test_config.dart';
+import 'door_beacon_cadence.dart';
 
 import 'diagnostic_action_hint.dart';
+import 'diagnostic_button_label.dart';
 
 import '../../widgets/described_action.dart';
 
 /// Independent camera lifetime. No BLE, WT, backend or safety ownership.
 abstract class ConcurrentCameraSource extends ChangeNotifier {
+  String? get cameraFingerprint => null;
   bool get running;
   bool get starting;
   String get status;
@@ -42,6 +46,13 @@ class NativeConcurrentCameraSource extends ConcurrentCameraSource {
   Future<void>? _opening, _closing;
   bool _disposed = false;
   int _generation = 0;
+  @override
+  String? get cameraFingerprint {
+    final camera = _description;
+    return camera == null
+        ? null
+        : '${camera.name}|${camera.lensDirection.name}|${camera.sensorOrientation}';
+  }
   @override
   bool get running => _pump.active;
   @override
@@ -239,6 +250,8 @@ class ConcurrentCameraPanel extends StatefulWidget {
     this.mountCalibration = const HeadTrackingMountCalibration(),
     this.horizontalFovDegrees = 0,
     this.headTrackedAudioEnabled = false,
+    this.doorBeaconTestConfig = const DoorBeaconTestConfig.disabled(),
+    this.doorBeaconReceipt,
     this.now,
   });
   final SpeechPriorityCoordinator priority;
@@ -253,6 +266,8 @@ class ConcurrentCameraPanel extends StatefulWidget {
   final HeadTrackingMountCalibration mountCalibration;
   final double horizontalFovDegrees;
   final bool headTrackedAudioEnabled;
+  final DoorBeaconTestConfig doorBeaconTestConfig;
+  final ValueListenable<DoorBeaconTestReceipt?>? doorBeaconReceipt;
   final DateTime Function()? now;
   @override
   State<ConcurrentCameraPanel> createState() => _ConcurrentCameraPanelState();
@@ -263,6 +278,7 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
   late final ConcurrentCameraSource _source;
   late final HeadTrackingState _headTracking;
   final _tracker = VisionSceneSummaryTracker(confirmationFrames: 3);
+  final _doorCadence = DoorBeaconCadence();
   final _owner = Object();
   final _clock = Stopwatch()..start();
   Timer? _expiry;
@@ -279,6 +295,9 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
   final _viewRevision = ValueNotifier<int>(0);
   Map<String, Object?> _outputDiagnostic = const {};
   bool Function()? _activeHrtfValid;
+  bool _doorStreamRequested = false, _doorSyncAgain = false;
+  Future<void>? _doorSyncTask;
+  int _doorStreamGeneration = 0;
   String _status = '화면 위치 소리 OFF';
   String? _audioStopFailure;
   DateTime get _now => widget.now?.call() ?? DateTime.now().toUtc();
@@ -292,6 +311,7 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
     _source = widget.source ?? NativeConcurrentCameraSource();
     _headTracking = widget.headTracking ?? sharedHeadTrackingState;
     _headTracking.addListener(_headTrackingChanged);
+    widget.doorBeaconReceipt?.addListener(_doorBeaconChanged);
     _source.addListener(_changed);
     WidgetsBinding.instance.addObserver(this);
     _expiry = Timer.periodic(
@@ -302,7 +322,10 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
 
   void _headTrackingChanged() {
     _checkHeadTrackedOutput();
+    unawaited(_syncDoorBeaconStream());
   }
+
+  void _doorBeaconChanged() => unawaited(_syncDoorBeaconStream());
 
   void _checkHeadTrackedOutput() {
     if (_activeHrtfValid?.call() != false) return;
@@ -331,6 +354,7 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
     if (_silencing != null) return _silencing!;
     final task = () async {
       try {
+        await _stopDoorBeaconStream();
         await widget.priority.stopObservation(_owner);
       } catch (_) {
         _audio = false;
@@ -349,6 +373,7 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
 
   void _expire() {
     _checkHeadTrackedOutput();
+    unawaited(_syncDoorBeaconStream());
     final fresh = _valid && _source.running && _scene.isFresh(_now);
     if (!fresh && (_meaning != null || _busy)) {
       unawaited(_silence(disable: !_valid));
@@ -396,6 +421,7 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
     }
     final scene = _scene;
     _meaning = scene.signature;
+    unawaited(_syncDoorBeaconStream());
     _refresh();
     if (_busy && _meaning != _activeMeaning) {
       _status = '장면 변경 · 이전 안내 취소';
@@ -416,6 +442,18 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
       return;
     }
     unawaited(_playScene(scene));
+  }
+
+  Future<void> _prepareDoorTestOutput() async {
+    try {
+      await widget.engine.output.prepareFromGesture();
+    } catch (_) {
+      if (_disposed) return;
+      _audio = false;
+      _audioStopFailure = 'Door test audio preparation failed';
+      _status = 'Door test audio preparation failed';
+      _refresh();
+    }
   }
 
   Future<void> _playScene(
@@ -596,6 +634,131 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
     }
   }
 
+  Future<void> _syncDoorBeaconStream() {
+    _doorSyncAgain = true;
+    if (_doorSyncTask != null) return _doorSyncTask!;
+    final task = () async {
+      do {
+        _doorSyncAgain = false;
+        await _syncDoorBeaconStreamOnce();
+      } while (_doorSyncAgain && !_disposed);
+    }();
+    _doorSyncTask = task;
+    return task.whenComplete(() => _doorSyncTask = null);
+  }
+
+  Future<void> _syncDoorBeaconStreamOnce() async {
+    final spatialOutput = widget.engine.output;
+    if (spatialOutput is! ContinuousBeaconTargetOutput) return;
+    final output = spatialOutput as ContinuousBeaconTargetOutput;
+    final config = widget.doorBeaconTestConfig;
+    final receipt = widget.doorBeaconReceipt?.value;
+    final observation = _source.observation;
+    final now = _now;
+    final invalid = !config.enabled || !_audio || !_valid ||
+        !_source.running || _busy || _silencing != null ||
+        widget.priority.priorityActive || widget.priority.outputUncertain ||
+        observation == null || receipt == null ||
+        !config.matches(
+          activeCameraFingerprint: _source.cameraFingerprint,
+          beaconId: receipt.beaconId,
+          beaconReceivedAt: receipt.receivedAt,
+          now: now,
+        );
+    if (invalid) {
+      await _stopDoorBeaconStream();
+      return;
+    }
+
+    final raw = observation.toDetectionResult()['detections'];
+    if (raw is! List) {
+      await _stopDoorBeaconStream();
+      return;
+    }
+    final obstacles = raw.where((row) => row is Map &&
+        const {'parked_pm', 'pole', 'tree_trunk'}.contains(row['classId']));
+    final doors = VisionScreenAudio.verifiedDoorDetections(raw)
+        .where((row) => row is Map && row['classId'] == 'bus_door' &&
+            row['bbox'] is Map)
+        .toList(growable: false);
+    if (obstacles.isNotEmpty || doors.length != 1 ||
+        !_scene.isFresh(now) || !_scene.reliable) {
+      await _stopDoorBeaconStream();
+      return;
+    }
+
+    final frameMatch = _headTracking.matchCameraFrame(
+      frameReceivedAt: observation.frame.receivedAt,
+      now: now,
+    );
+    if (frameMatch == null ||
+        !frameMatch.sample.usable(now,
+            maximumAge: maximumHeadSampleAgeForCue)) {
+      await _stopDoorBeaconStream();
+      return;
+    }
+    final age = now.difference(frameMatch.sample.receivedAt!.toUtc());
+    final beaconAge = now.difference(receipt.receivedAt.toUtc());
+    if (age.isNegative || age.inMilliseconds > 249 ||
+        beaconAge.isNegative || beaconAge.inMilliseconds > 1199 ||
+        receipt.rssi < -120 || receipt.rssi >= 0) {
+      await _stopDoorBeaconStream();
+      return;
+    }
+    final box = Map<String, Object?>.from(doors.single['bbox'] as Map);
+    final cameraAngle = horizontalAngleForNormalizedBbox(
+      x: (box['x'] as num).toDouble(),
+      width: (box['w'] as num).toDouble(),
+      horizontalFovDegrees: config.horizontalFovDegrees,
+    );
+    final azimuth = headTrackedAngleForMount(
+      cameraAngle: cameraAngle,
+      sensor: frameMatch.sample,
+      now: now,
+      calibration: config.calibration,
+    );
+    if (azimuth == null ||
+        frameMatch.absoluteSkew > maximumCameraSensorSkew) {
+      await _stopDoorBeaconStream();
+      return;
+    }
+
+    final generation = ++_doorStreamGeneration;
+    _doorStreamRequested = true;
+    try {
+      final started = await output.syncBeaconTargetStream(
+        intervalMs: _doorCadence.intervalForRssi(receipt.rssi),
+        azimuthDegrees: azimuth,
+        sensorAgeMs: age.inMilliseconds,
+        beaconAgeMs: beaconAge.inMilliseconds,
+      );
+      if (!started || generation != _doorStreamGeneration || !_valid) {
+        await _stopDoorBeaconStream();
+      }
+    } catch (_) {
+      await _stopDoorBeaconStream();
+    }
+  }
+
+  Future<void> _stopDoorBeaconStream() async {
+    final spatialOutput = widget.engine.output;
+    ++_doorStreamGeneration;
+    if (!_doorStreamRequested || spatialOutput is! ContinuousBeaconTargetOutput) {
+      _doorStreamRequested = false;
+      return;
+    }
+    _doorStreamRequested = false;
+    final output = spatialOutput as ContinuousBeaconTargetOutput;
+    try {
+      await output.stopBeaconTargetStream();
+    } catch (_) {
+      _audioStopFailure = 'Door beacon audio stop not confirmed';
+      _audio = false;
+      _status = 'Door beacon audio stop not confirmed';
+      _refresh();
+    }
+  }
+
   Future<void> _stopCamera() async {
     _tracker.clear();
     try {
@@ -625,7 +788,9 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
     WidgetsBinding.instance.removeObserver(this);
     _source.removeListener(_changed);
     _headTracking.removeListener(_headTrackingChanged);
+    widget.doorBeaconReceipt?.removeListener(_doorBeaconChanged);
     _viewRevision.dispose();
+    unawaited(_stopDoorBeaconStream());
     unawaited(
         widget.priority.stopObservation(_owner).catchError((Object error) {
       debugPrint('Camera audio cleanup failed: ${error.runtimeType}');
@@ -756,7 +921,8 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                                             !_source.starting
                                         ? () => _source.start()
                                         : null,
-                                    child: const Text('카메라 시작')))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.videocam_outlined, '카메라 시작')))),
                         const SizedBox(width: 8),
                         Expanded(
                             child: DiagnosticActionHint(
@@ -766,7 +932,9 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                                         _source.running || _source.starting
                                             ? () => _stopCamera()
                                             : null,
-                                    child: const Text('카메라 중지')))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.videocam_off_outlined,
+                                        '카메라 중지')))),
                       ]),
                       if (item != null && item.jpeg.isNotEmpty)
                         SizedBox(
@@ -814,9 +982,14 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                                                   _status =
                                                       '새 프레임부터 화면 위치 소리 시작';
                                                 });
+                                                if (widget.doorBeaconTestConfig.enabled) {
+                                                  unawaited(_prepareDoorTestOutput());
+                                                }
                                               }
                                             : null,
-                                        child: const Text('소리 시작'))))),
+                                        child: const DiagnosticButtonLabel(
+                                            Icons.volume_up_outlined,
+                                            '소리 시작'))))),
                         const SizedBox(width: 8),
                         Expanded(
                             child: Semantics(
@@ -827,7 +1000,9 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                                         onPressed: _audio || _busy
                                             ? () => _silence(disable: true)
                                             : null,
-                                        child: const Text('소리 중지'))))),
+                                        child: const DiagnosticButtonLabel(
+                                            Icons.volume_off_outlined,
+                                            '소리 중지'))))),
                       ]),
                       Row(children: [
                         Expanded(
@@ -842,7 +1017,8 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                                         _scene.isFresh(DateTime.now().toUtc())
                                     ? () => _playScene(_scene, detail: true)
                                     : null,
-                                child: const Text('자세히 듣기'))),
+                                child: const DiagnosticButtonLabel(
+                                    Icons.hearing, '자세히 듣기'))),
                       ]),
                       const Text('화면 위치만 안내 · 거리/접근 판단 없음',
                           style: TextStyle(fontSize: 12)),
@@ -884,14 +1060,16 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                             _valid && !_source.running && !_source.starting
                                 ? () => _source.start()
                                 : null,
-                        child: const Text('카메라 시작'))),
+                        child: const DiagnosticButtonLabel(
+                            Icons.videocam_outlined, '카메라 시작'))),
                 DiagnosticActionHint(
                     hint: '이 진단 조작을 실행합니다.',
                     child: OutlinedButton(
                         onPressed: _source.running || _source.starting
                             ? () => _stopCamera()
                             : null,
-                        child: const Text('카메라 중지'))),
+                        child: const DiagnosticButtonLabel(
+                            Icons.videocam_off_outlined, '카메라 중지'))),
               ]),
               if (item != null && item.jpeg.isNotEmpty)
                 SizedBox(
@@ -937,14 +1115,16 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                                 });
                               }
                             : null,
-                        child: const Text('화면 위치 소리 시작'))),
+                        child: const DiagnosticButtonLabel(
+                            Icons.volume_up_outlined, '화면 위치 소리 시작'))),
                 DiagnosticActionHint(
                     hint: '이 진단 조작을 실행합니다.',
                     child: OutlinedButton(
                         onPressed: _audio || _busy
                             ? () => _silence(disable: true)
                             : null,
-                        child: const Text('화면 위치 소리 중지'))),
+                        child: const DiagnosticButtonLabel(
+                            Icons.volume_off_outlined, '화면 위치 소리 중지'))),
               ]),
               Semantics(
                   liveRegion: true,
@@ -962,7 +1142,8 @@ class _ConcurrentCameraPanelState extends State<ConcurrentCameraPanel>
                               _scene.isFresh(DateTime.now().toUtc())
                           ? () => _playScene(_scene, detail: true)
                           : null,
-                      child: const Text('자세히 듣기'))),
+                      child: const DiagnosticButtonLabel(
+                          Icons.hearing, '자세히 듣기'))),
               Text(visionReceiptAgeLabel(
                   _lastReceivedAt, DateTime.now().toUtc())),
               Text(

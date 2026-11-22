@@ -309,14 +309,16 @@ class _GuidanceBeaconPanelState extends State<GuidanceBeaconPanel>
             const Text('BLE 수신만으로 승차 가능 여부·방향·거리를 판단하지 않습니다.'),
             if (_audioError != null) Text(_audioError!),
             Wrap(spacing: 8, children: [
-              OutlinedButton(
+              OutlinedButton.icon(
                   onPressed: !_running && _stopping == null && _guard()
                       ? _start
                       : null,
-                  child: const Text('BLE 스캔 시작')),
-              OutlinedButton(
+                  icon: const Icon(Icons.bluetooth_searching),
+                  label: const Text('BLE 스캔 시작')),
+              OutlinedButton.icon(
                   onPressed: _running ? () => _stop('사용자 중지 · BLE 미감지') : null,
-                  child: const Text('BLE 스캔 중지')),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('BLE 스캔 중지')),
             ])
           ])));
 }

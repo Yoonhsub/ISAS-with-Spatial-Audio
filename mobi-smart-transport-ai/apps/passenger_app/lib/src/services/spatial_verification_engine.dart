@@ -28,10 +28,30 @@ abstract interface class HeadTrackedCueOutput {
   Future<bool> playHeadTrackedCue(double azimuthDegrees);
 }
 
+/// Opt-in, bounded continuous cue driven by current selected-beacon and WT
+/// receipts. The azimuth must come from a fresh verified visual target.
+abstract interface class ContinuousBeaconTargetOutput {
+  Future<bool> syncBeaconTargetStream({
+    required int intervalMs,
+    required double azimuthDegrees,
+    required int sensorAgeMs,
+    required int beaconAgeMs,
+  });
+  Future<bool> stopBeaconTargetStream();
+}
+
 class _GuidanceRequest {
-  _GuidanceRequest(this.guidance, this.isCurrent, this.admit, this.phase,
-      this.spokenText, this.cueOnly, this.informationalTone);
+  _GuidanceRequest(
+      this.guidance,
+      this.isCurrent,
+      this.admit,
+      this.phase,
+      this.spokenText,
+      this.cueOnly,
+      this.informationalTone,
+      this.cueAfterSpeech);
   final bool cueOnly;
+  final bool cueAfterSpeech;
   final InformationalCueTone? informationalTone;
   final bool Function()? admit;
   final void Function(String)? phase;
@@ -59,10 +79,14 @@ class SpatialVerificationEngine implements SpeechEngine {
       void Function(String)? phase,
       String? spokenText,
       bool cueOnly = false,
+      bool cueAfterSpeech = false,
       InformationalCueTone? informationalTone}) {
     guidance.validate();
     if (cueOnly && !guidance.hasReviewedDirection) {
       throw ArgumentError('Cue-only requests require reviewed direction');
+    }
+    if (cueOnly && cueAfterSpeech) {
+      throw ArgumentError('Cue-only requests cannot be sequenced after speech');
     }
     if (informationalTone != null &&
         guidance.provenance != DirectionalGuidance.screenProvenance) {
@@ -79,7 +103,7 @@ class SpatialVerificationEngine implements SpeechEngine {
     if (_seen.length > 128) _seen.remove(_seen.first);
     final command = '@guidance:${++_nextGuidance}';
     _guidanceRequests[command] = _GuidanceRequest(guidance, isCurrent, admit,
-        phase, spokenText, cueOnly, informationalTone);
+        phase, spokenText, cueOnly, informationalTone, cueAfterSpeech);
     return command;
   }
 
@@ -100,7 +124,9 @@ class SpatialVerificationEngine implements SpeechEngine {
   Future<void> _speakGuidance(_GuidanceRequest request, int revision) async {
     final guidance = request.guidance;
     _guidanceCheck(request, revision);
-    if (guidance.hasReviewedDirection) {
+
+    Future<void> playDirectionCue() async {
+      if (!guidance.hasReviewedDirection) return;
       if (output is! DirectionalCueOutput) {
         throw StateError('Short Cue capability missing');
       }
@@ -130,15 +156,30 @@ class SpatialVerificationEngine implements SpeechEngine {
       _guidanceCheck(request, revision);
       _trace(request, 'CUE_STOP_CONFIRMED');
     }
+
+    if (guidance.hasReviewedDirection && !request.cueAfterSpeech) {
+      await playDirectionCue();
+    }
     if (request.cueOnly) return;
-    await tts.prepare(requireKoreanVoice: true);
-    _guidanceCheck(request, revision);
-    if (!(request.admit?.call() ?? true)) throw SpeechCancelled();
-    _trace(request, 'TTS_START');
-    _guidanceCheck(request, revision);
-    await tts.speak(request.spokenText ?? guidance.spokenText);
-    _guidanceCheck(request, revision);
-    _trace(request, 'TTS_COMPLETED');
+    try {
+      await tts.prepare(requireKoreanVoice: true);
+      _guidanceCheck(request, revision);
+      if (!(request.admit?.call() ?? true)) throw SpeechCancelled();
+      _trace(request, 'TTS_START');
+      _guidanceCheck(request, revision);
+      await tts.speak(request.spokenText ?? guidance.spokenText);
+      _guidanceCheck(request, revision);
+      _trace(request, 'TTS_COMPLETED');
+    } catch (error, stack) {
+      if (!request.cueAfterSpeech || error is SpeechCancelled) rethrow;
+      // A TTS engine failure must not silently remove this existing direction
+      // ping. Explicit cancellation, STOP, and stale-frame invalidation still
+      // fail the guard above and never replay a late cue.
+      _guidanceCheck(request, revision);
+      await playDirectionCue();
+      Error.throwWithStackTrace(error, stack);
+    }
+    if (request.cueAfterSpeech) await playDirectionCue();
   }
 
   final SpatialTestOutput output;

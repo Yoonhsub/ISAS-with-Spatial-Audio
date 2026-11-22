@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show Rect;
 import 'vision_scene_summary.dart';
 import 'package:flutter/foundation.dart';
 import 'directional_guidance.dart';
@@ -19,6 +20,7 @@ class VisionScreenAudio extends ChangeNotifier {
     HeadTrackingState? headTracking,
     double? horizontalFovDegrees,
     int Function()? nowMicros,
+    this.arrivalBusNumber,
     this.minimumInterval = const Duration(seconds: 8),
     this.confirmationFrames = 1,
     this.requireDoorInBus = false,
@@ -55,6 +57,32 @@ class VisionScreenAudio extends ChangeNotifier {
   final String sessionGeneration;
   final bool Function() isCurrent;
   final Duration minimumInterval;
+  final String? Function()? arrivalBusNumber;
+  String? _announcedBus, _pendingArrival;
+  bool get arrivalAnnounced =>
+      enabled && _announcedBus != null && _announcedBus == arrivalBusNumber?.call();
+
+  Future<void> _announceArrival(String number, int deadline) async {
+    final revision = _revision;
+    bool current() => !_disposed && enabled && isCurrent() &&
+        revision == _revision && !priority.priorityActive &&
+        arrivalBusNumber?.call() == number;
+    _pendingArrival = number;
+    busy = true;
+    diagnostic = {'classId': 'bus', 'routeNo': number};
+    _notify();
+    try {
+      final spoken = await priority.speakObservation(_owner,
+          '${number}번 버스가 진입 중입니다.', current, admit: () => _now() < deadline);
+      if (spoken && current()) _announcedBus = number;
+    } catch (error) {
+      debugPrint('Bus arrival speech failed: ${error.runtimeType}');
+    } finally {
+      _pendingArrival = null;
+      busy = false;
+      _notify();
+    }
+  }
   final int confirmationFrames;
   final bool requireDoorInBus;
   final bool prioritizeByDistance;
@@ -94,10 +122,13 @@ class VisionScreenAudio extends ChangeNotifier {
       _notify();
     }
   }
+
   int _revision = 0, admitted = 0, completed = 0, skippedBusy = 0;
   int _streakCount = 0;
   String status = '카메라 화면 음향 시연 OFF';
   String? _lastFrame, _lastMeaning, _streakMeaning;
+  void Function(Map? selected, String? previousFrame, Duration age)?
+      _confirmSpokenObstacle;
   int? _lastStarted;
   PriorityLease? _hold;
   Map<String, Object?> diagnostic = const {};
@@ -139,6 +170,31 @@ class VisionScreenAudio extends ChangeNotifier {
     'bus': 4,
     'bus_stop': 5,
   };
+
+  /// Compact object-only Korean phrase for ordinary automatic camera audio.
+  /// The omitted model/distance disclaimer remains in the visual diagnostics.
+  static String objectLocationSentence(TestDirection side, String classId) {
+    final sideText = switch (side) {
+      TestDirection.left => '\uC67C\uCABD',
+      TestDirection.center => '\uAC00\uC6B4\uB370',
+      TestDirection.right => '\uC624\uB978\uCABD',
+    };
+    final objectName = switch (classId) {
+      'parked_pm' => '\uC804\uB3D9 \uD0B5\uBCF4\uB4DC',
+      'pole' => '\uBCF4\uB3C4 \uAE30\uB465',
+      'tree_trunk' => '\uB098\uBB34 \uC904\uAE30',
+      'bus_door' => '\uBC84\uC2A4 \uBB38',
+      'bus' => '\uBC84\uC2A4',
+      'bus_stop' => '\uBC84\uC2A4 \uC815\uB958\uC7A5',
+      _ => throw ArgumentError.value(classId, 'classId', 'Unsupported class'),
+    };
+    final last = objectName.runes.last;
+    final hasFinalConsonant =
+        last >= 0xAC00 && last <= 0xD7A3 && (last - 0xAC00) % 28 != 0;
+    final particle = hasFinalConsonant ? '\uC774' : '\uAC00';
+    return '\uD654\uBA74 $sideText\uC5D0 $objectName$particle \uC788\uC2B5\uB2C8\uB2E4.';
+  }
+
   static TestDirection direction(double centerX) => centerX < 1 / 3
       ? TestDirection.left
       : centerX > 2 / 3
@@ -460,6 +516,7 @@ class VisionScreenAudio extends ChangeNotifier {
   }
 
   Future<void> stop({bool notify = true}) {
+    _announcedBus = null;
     _sceneTimer?.cancel();
     _sceneTracker.invalidate(reason: 'stopped');
     _sceneMeaning = null;
@@ -520,6 +577,7 @@ class VisionScreenAudio extends ChangeNotifier {
         result['frameId'] == _lastFrame) {
       return;
     }
+    final previousFrame = _lastFrame;
     _lastFrame = result['frameId'] as String;
     if (priority.priorityActive) {
       skippedBusy++;
@@ -536,10 +594,19 @@ class VisionScreenAudio extends ChangeNotifier {
       return;
     }
     final analysis = _analyzeFrame(rows);
+    final arrivalBus = arrivalBusNumber?.call();
+    if (_announcedBus != arrivalBus) _announcedBus = null;
+    if (_pendingArrival != null && arrivalBus != _pendingArrival && !_preempting) {
+      _preempting = true;
+      _revision++;
+      unawaited(_stopOwned().whenComplete(() => _preempting = false));
+      return;
+    }
     // Stop only our lower-priority preview output. Do not replay this frame
     // after cancellation: a new, fresh camera frame must confirm the obstacle.
     if (_preempting) return;
     if (busy) {
+      _confirmSpokenObstacle?.call(analysis.selected, previousFrame, age);
       if (_isObstacle(analysis.selected?['classId']) &&
           !_isObstacle(diagnostic['classId'])) {
         _preempting = true;
@@ -566,6 +633,16 @@ class VisionScreenAudio extends ChangeNotifier {
       }
       return;
     }
+    if (arrivalBus != null && (selected['classId'] == 'bus' || selected['classId'] == 'bus_door')) {
+      final buses = rows.whereType<Map>().where((r) => r['classId'] == 'bus');
+      final doors = rows.whereType<Map>().where((r) => r['classId'] == 'bus_door');
+      if (_announcedBus != arrivalBus && buses.length <= 1 && doors.length <= 1 &&
+          age < const Duration(seconds: 1)) {
+        final deadline = _now() + const Duration(seconds: 1).inMicroseconds - age.inMicroseconds;
+        unawaited(_announceArrival(arrivalBus, deadline));
+      }
+      return;
+    }
     final box = selected['bbox'] as Map;
     final cx = (box['x'] as num).toDouble() + (box['w'] as num).toDouble() / 2;
     final side = direction(cx), meaning = '${selected['classId']}:${side.name}';
@@ -586,30 +663,29 @@ class VisionScreenAudio extends ChangeNotifier {
             _now() - _lastStarted! < minimumInterval.inMicroseconds)) {
       return;
     }
-    final sideText = switch (side) {
-      TestDirection.left => '왼쪽',
-      TestDirection.center => '가운데',
-      TestDirection.right => '오른쪽',
-    };
-    final text =
-        '화면 위치 시연입니다. 화면 $sideText, 인식된 객체 이름은 ${selected['className']}입니다. 실제 거리와 이동 방향은 알 수 없습니다.';
+    final text = objectLocationSentence(side, selected['classId'] as String);
+    final freshnessDeadline =
+        _now() + const Duration(seconds: 2).inMicroseconds - age.inMicroseconds;
+    var confirmedFrame = result['frameId'] as String;
+    var confirmedUntil = freshnessDeadline;
     final revision = _revision;
-    bool valid() =>
-        !_disposed &&
-        enabled &&
-        revision == _revision &&
-        isCurrent() &&
-        !priority.priorityActive;
     final admission = ObservationAdmission(
-      deadlineMicros: _now() +
-          const Duration(seconds: 2).inMicroseconds -
-          age.inMicroseconds,
+      deadlineMicros: freshnessDeadline,
       nowMicros: _now,
       eventId: result['frameId'] as String,
       sessionGeneration: sessionGeneration,
       receivedAt: DateTime.now().toUtc().toIso8601String(),
       eventCreatedAt: result['capturedAt'],
     );
+    bool valid() =>
+        !_disposed &&
+        enabled &&
+        revision == _revision &&
+        _lastFrame == confirmedFrame &&
+        _now() < confirmedUntil &&
+        admission.cancelReason == null &&
+        isCurrent() &&
+        !priority.priorityActive;
     bool admit() {
       final already = admission.started;
       if (!admission.admit()) return false;
@@ -656,6 +732,42 @@ class VisionScreenAudio extends ChangeNotifier {
     } else if (headTrackingEnabled) {
       _invalidateHeadTracking('장착·센서 조건 무효');
     }
+    // Only the pending screen-relative ping may follow newer frames. Speech
+    // admission and head-tracked angles remain bound to their original frame.
+    Rect bounds(Map box) => Rect.fromLTWH(
+          (box['x'] as num).toDouble(),
+          (box['y'] as num).toDouble(),
+          (box['w'] as num).toDouble(),
+          (box['h'] as num).toDouble(),
+        );
+    var previousBounds = bounds(box);
+    void confirmSpokenObstacle(Map? next, String? previousFrame, Duration age) {
+      final now = _now();
+      final deadline =
+          now + const Duration(seconds: 2).inMicroseconds - age.inMicroseconds;
+      if (previousFrame != confirmedFrame ||
+          now >= confirmedUntil ||
+          deadline < confirmedUntil ||
+          next == null ||
+          next['classId'] != selected['classId']) {
+        return;
+      }
+      final current = bounds(next['bbox'] as Map);
+      if (direction(current.center.dx) != side) return;
+      // Require at least 0.5 IoU between consecutive selected boxes so a
+      // different obstacle elsewhere in the same screen region cannot renew it.
+      final overlap = previousBounds.intersect(current);
+      if (overlap.isEmpty) return;
+      final intersection = overlap.width * overlap.height;
+      final union = previousBounds.width * previousBounds.height +
+          current.width * current.height - intersection;
+      if (intersection < union * 0.5) return;
+      previousBounds = current;
+      confirmedFrame = _lastFrame!;
+      confirmedUntil = deadline;
+    }
+
+    var directionCueCompleted = false;
     final guidance = DirectionalGuidance(
       guidanceId: result['frameId'] as String,
       sessionGeneration: sessionGeneration,
@@ -674,8 +786,15 @@ class VisionScreenAudio extends ChangeNotifier {
       valid,
       admit: admit,
       spokenText: text,
+      cueAfterSpeech: true,
       phase: (phase) {
+        if (phase == 'CUE_COMPLETED') directionCueCompleted = true;
         if (valid()) {
+          if (phase == 'TTS_START' &&
+              correctedAngle == null &&
+              _isObstacle(selected['classId'])) {
+            _confirmSpokenObstacle = confirmSpokenObstacle;
+          }
           status = phase;
           diagnostic = {...diagnostic, 'phase': phase};
           _notify();
@@ -730,6 +849,12 @@ class VisionScreenAudio extends ChangeNotifier {
         }
       } catch (error) {
         admission.cancel('AUDIO_FAILURE');
+        if (!directionCueCompleted &&
+            revision == _revision &&
+            _lastMeaning == meaning) {
+          // A cancelled/expired TTS with no ping can retry on a later fresh frame.
+          _lastMeaning = null;
+        }
         debugPrint('Camera screen audio failure: ${error.runtimeType}');
         if (!_disposed && revision == _revision) {
           if (error is SpeechCancelled && !priority.outputUncertain) {
@@ -740,6 +865,7 @@ class VisionScreenAudio extends ChangeNotifier {
           }
         }
       } finally {
+        _confirmSpokenObstacle = null;
         engine.retireGuidance(command);
         busy = false;
         _activeHeadTracked = false;

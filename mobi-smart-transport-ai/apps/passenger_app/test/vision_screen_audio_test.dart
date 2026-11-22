@@ -12,7 +12,6 @@ import 'package:mobi_passenger_app/src/services/native_directional_cue_output.da
 import 'package:mobi_passenger_app/src/services/spatial_verification_engine.dart';
 import 'package:mobi_passenger_app/src/services/speech_priority_coordinator.dart';
 import 'package:mobi_passenger_app/src/widgets/vision_screen_audio_panel.dart';
-import 'package:mobi_passenger_app/src/features/hardware_bus/beacon_tone_interval.dart';
 import 'local_vision_test.dart' as camera;
 import 'native_android_audio_test.dart' as native;
 import 'vision_observation_tts_test.dart' as speech;
@@ -132,6 +131,40 @@ void main() {
       await t.pump();
     }
   }
+
+  testWidgets('bus photo announces selected route once before enabling the directional sound', (t) async {
+    final tts = speech.FakeTts();
+    final engine = SpatialVerificationEngine(NativeDirectionalCueOutput(port: native.Port()), tts);
+    final priority = SpeechPriorityCoordinator(engine);
+    String? number = '711';
+    final a = VisionScreenAudio(priority: priority, engine: engine, sessionGeneration: 'photo',
+        arrivalBusNumber: () => number, isCurrent: () => true);
+    a.setEnabled(true);
+    void see(int n, List<LocalBox> boxes) =>
+        a.observe(detection(n, boxes: boxes).toDetectionResult(), age: Duration.zero);
+    const bus = LocalBox('bus',.9,.1,.2,.2,.3);
+    const door = LocalBox('bus_door',.9,.4,.2,.2,.3);
+    see(1,[bus,bus]);
+    await flush(t);
+    expect(tts.spoken,isEmpty);
+    see(2,[door]);
+    await flush(t);
+    expect(tts.spoken,['711번 버스가 진입 중입니다.']);
+    expect(a.arrivalAnnounced,isFalse);
+    see(3,[bus]);
+    tts.finish();
+    await flush(t);
+    expect(a.arrivalAnnounced,isTrue);
+    see(4,[bus,door]);
+    await flush(t);
+    expect(tts.spoken,hasLength(1));
+    number = null;
+    expect(a.arrivalAnnounced,isFalse);
+    await a.stop();
+    a.dispose();
+    await engine.dispose();
+    priority.dispose();
+  });
 
   for (final side in ['LEFT', 'CENTER', 'RIGHT']) {
     testWidgets(
@@ -470,7 +503,7 @@ void main() {
   });
 
   testWidgets(
-      'online object audio displays automatic state without an enable switch',
+      'normal camera shows only the demo ON/OFF state and no separate controls',
       (t) async {
     final engine = SpatialVerificationEngine(
         NativeDirectionalCueOutput(port: native.Port()), speech.FakeTts());
@@ -487,16 +520,20 @@ void main() {
                 cameraActive: true,
                 diagnostics: false,
                 automaticallyEnabled: true))));
-    expect(find.text('객체 음성·방향음 안내'), findsOneWidget);
+    expect(find.text('객체 음성·방향음 안내'), findsNothing);
+    expect(find.text('카메라 화면 음향 시연 OFF'), findsOneWidget);
+    expect(find.text('현재 장면 듣기'), findsNothing);
     expect(find.text('카메라 장착 방식'), findsNothing);
     expect(find.text('화면 음향 Live Hold'), findsNothing);
     expect(find.byType(Switch), findsNothing);
     audio.setEnabled(true);
     await t.pump();
-    expect(find.text('카메라와 함께 켜짐'), findsOneWidget);
+    expect(find.text('카메라 화면 음향 시연 ON'), findsOneWidget);
+    expect(find.text('카메라 화면 음향 시연 OFF'), findsNothing);
     await audio.stop();
     await t.pump();
-    expect(find.text('카메라와 함께 켜짐'), findsNothing);
+    expect(find.text('카메라 화면 음향 시연 ON'), findsNothing);
+    expect(find.text('카메라 화면 음향 시연 OFF'), findsOneWidget);
     await t.pumpWidget(const SizedBox());
     audio.dispose();
     await engine.dispose();

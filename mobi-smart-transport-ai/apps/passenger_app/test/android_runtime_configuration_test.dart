@@ -130,8 +130,16 @@ void main() {
       expect(find.text('TAGO 실데이터 테스트'), findsNothing);
       expect(find.text('동시 기기 테스트 (임시)'), findsNothing);
       for (final button in tester.widgetList<ButtonStyleButton>(buttons)) {
-        final foreground = button.style!.foregroundColor!.resolve({})!;
-        final background = button.style!.backgroundColor!.resolve({})!;
+        final theme = Theme.of(tester.element(find.byWidget(button)));
+        final themeStyle = button is FilledButton
+            ? theme.filledButtonTheme.style
+            : theme.outlinedButtonTheme.style;
+        final foreground = (button.style?.foregroundColor ??
+                themeStyle?.foregroundColor)!
+            .resolve({})!;
+        final background = (button.style?.backgroundColor ??
+                themeStyle?.backgroundColor)!
+            .resolve({})!;
         final luminances = [
           foreground.computeLuminance(),
           background.computeLuminance()

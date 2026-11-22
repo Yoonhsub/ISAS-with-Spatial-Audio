@@ -37,38 +37,43 @@ class VisionScreenAudioPanel extends StatelessWidget {
         listenable: audio,
         builder: (context, _) {
           if (!diagnostics) {
+            if (automaticallyEnabled) {
+              final enabled = cameraActive && audio.enabled;
+              return Semantics(
+                liveRegion: true,
+                child: Card(
+                  child: ListTile(
+                    leading: Icon(enabled
+                        ? Icons.volume_up_outlined
+                        : Icons.volume_off_outlined),
+                    title: Text('카메라 화면 음향 시연 ${enabled ? 'ON' : 'OFF'}'),
+                  ),
+                ),
+              );
+            }
             return Card(
                 child: Column(children: [
-              if (automaticallyEnabled)
-                ListTile(
-                  title: const Text('객체 음성·방향음 안내'),
-                  subtitle: Text(
-                      audio.enabled ? '카메라와 함께 켜짐' : '카메라를 시작하면 자동으로 켜집니다.'),
-                )
-              else
-                DiagnosticActionHint(
-                    hint: '현재 진단 설정을 켜거나 끕니다.',
-                    child: SwitchListTile(
-                      title: const Text('객체 음성·방향음 안내'),
-                      subtitle: const Text(
-                          '화면 기준 객체 정보입니다. 거리나 안전한 이동 방향을 판단하지 않습니다.'),
-                      value: audio.enabled,
-                      onChanged: cameraActive ? audio.setEnabled : null,
-                    )),
-              if (automaticallyEnabled)
-                const Text(
-                    '객체 위치는 카메라 화면 기준입니다. 실제 거리와 안전한 이동 방향은 확인할 수 없습니다.'),
+              DiagnosticActionHint(
+                  hint: '현재 진단 설정을 켜거나 끕니다.',
+                  child: SwitchListTile(
+                    title: const Text('객체 음성·방향음 안내'),
+                    subtitle: const Text(
+                        '화면 기준 객체 정보입니다. 거리나 안전한 이동 방향을 판단하지 않습니다.'),
+                    value: audio.enabled,
+                    onChanged: cameraActive ? audio.setEnabled : null,
+                  )),
               Text(audio.status),
               if (audio.sceneMode)
                 DescribedAction.button(
                     label: '현재 장면 듣기',
                     description: '현재 인식된 객체와 화면 위치를 음성으로 설명합니다.',
                     immediate: false,
-                    child: OutlinedButton(
+                    child: OutlinedButton.icon(
                         onPressed: cameraActive && audio.canDescribeScene
                             ? audio.describeScene
                             : null,
-                        child: const Text('현재 장면 듣기'))),
+                        icon: const Icon(Icons.volume_up_outlined),
+                        label: const Text('현재 장면 듣기'))),
             ]));
           }
           final d = audio.diagnostic;
@@ -105,11 +110,12 @@ class VisionScreenAudioPanel extends StatelessWidget {
                         '앱의 카메라 콜백 수신 시각입니다. 실제 촬영 시각이나 귀에 들린 시각을 측정한 값은 아닙니다.'),
                     DiagnosticActionHint(
                         hint: '이 진단 조작을 실행합니다.',
-                        child: OutlinedButton(
+                        child: OutlinedButton.icon(
                             onPressed: cameraActive && audio.canDescribeScene
                                 ? audio.describeScene
                                 : null,
-                            child: const Text('자세히 듣기'))),
+                            icon: const Icon(Icons.volume_up_outlined),
+                            label: const Text('자세히 듣기'))),
                     const Text(
                         '통제된 정지 시연용입니다. 다중 장면에는 한 방향 핑을 붙이지 않으며 실제 위험·거리·안전한 경로를 판단하지 않습니다.'),
                   ],
@@ -220,19 +226,24 @@ class VisionScreenAudioPanel extends StatelessWidget {
                     ),
                   Wrap(
                     spacing: 8,
+                    runSpacing: 8,
                     children: [
                       if (showStopButton)
                         DiagnosticActionHint(
                             hint: '진단 음향을 즉시 중지합니다.',
-                            child: OutlinedButton(
+                            child: OutlinedButton.icon(
                               onPressed: audio.stop,
-                              child: const Text('화면 음향 STOP'),
+                              icon: const Icon(Icons.stop_circle_outlined),
+                              label: const Text('화면 음향 STOP'),
                             )),
                       DiagnosticActionHint(
                           hint: '이 진단 조작을 실행합니다.',
-                          child: OutlinedButton(
+                          child: OutlinedButton.icon(
                             onPressed: audio.toggleHold,
-                            child: Text(
+                            icon: Icon(audio.holding
+                                ? Icons.play_arrow
+                                : Icons.pause),
+                            label: Text(
                               audio.holding
                                   ? '화면 음향 Hold 해제'
                                   : '화면 음향 Live Hold',

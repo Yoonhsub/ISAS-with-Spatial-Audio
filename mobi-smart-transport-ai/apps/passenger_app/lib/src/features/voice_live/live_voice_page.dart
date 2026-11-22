@@ -3,14 +3,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import 'aurora_voice_shader.dart';
 import 'live_caption_controller.dart';
 import 'live_caption_overlay.dart';
 import 'live_voice_controller.dart';
 import 'voice_turn_state.dart';
 
 /// 전체 화면 Live 음성 대화 페이지.
-/// 검은 배경 + 하단 오로라 + 마이크 버튼 기반 turn-taking + 5줄 rolling 자막.
+/// 불투명한 흑백 화면 + 마이크 버튼 기반 turn-taking + 5줄 rolling 자막.
 class LiveVoicePage extends StatefulWidget {
   const LiveVoicePage({
     super.key,
@@ -32,7 +31,8 @@ class LiveVoicePage extends StatefulWidget {
   final void Function(
     List<LiveCaptionLine> sessionLog, {
     required bool navigated,
-  }) onExit;
+  })
+  onExit;
 
   @override
   State<LiveVoicePage> createState() => _LiveVoicePageState();
@@ -105,17 +105,10 @@ class _LiveVoicePageState extends State<LiveVoicePage> {
         if (!didPop) _exit(navigated: false);
       },
       child: Scaffold(
-        backgroundColor: const Color(0xFF05070C),
+        backgroundColor: Colors.white,
         body: Stack(
           fit: StackFit.expand,
           children: [
-            // 하단 오로라(전체에 깔되 셰이더가 위쪽은 투명 처리).
-            Positioned.fill(
-              child: AuroraVoiceBackground(
-                level: _controller.level,
-                mode: _controller.shaderMode,
-              ),
-            ),
             // 상단 Live 상태.
             SafeArea(
               child: Align(
@@ -129,7 +122,7 @@ class _LiveVoicePageState extends State<LiveVoicePage> {
                 ),
               ),
             ),
-            // 자막(오로라 위쪽, 하단 컨트롤과 안 겹치게 padding).
+            // 자막(하단 컨트롤과 안 겹치게 padding).
             Positioned(
               left: 0,
               right: 0,
@@ -151,12 +144,13 @@ class _LiveVoicePageState extends State<LiveVoicePage> {
                   child: ValueListenableBuilder<VoiceTurnState>(
                     valueListenable: _controller.state,
                     builder: (context, state, _) => _BottomControls(
-                        immediateMic: state != VoiceTurnState.idle,
-                        onMicTap: () {
-                          DescribedAction.cancelDescriptions();
-                          _controller.handleMicTap();
-                        },
-                        onClose: () => _exit(navigated: false)),
+                      immediateMic: state != VoiceTurnState.idle,
+                      onMicTap: () {
+                        DescribedAction.cancelDescriptions();
+                        _controller.handleMicTap();
+                      },
+                      onClose: () => _exit(navigated: false),
+                    ),
                   ),
                 ),
               ),
@@ -178,12 +172,12 @@ class _TopStatus extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Icon(Icons.graphic_eq, color: Colors.white, size: 20),
+        const Icon(Icons.graphic_eq, color: Color(0xFF111111), size: 20),
         const SizedBox(width: 8),
         const Text(
           'Live',
           style: TextStyle(
-            color: Colors.white,
+            color: Color(0xFF111111),
             fontSize: 18,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.5,
@@ -193,12 +187,12 @@ class _TopStatus extends StatelessWidget {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.12),
+            color: const Color(0xFF111111),
             borderRadius: BorderRadius.circular(20),
           ),
           child: Text(
             state.statusLabel,
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
+            style: const TextStyle(color: Colors.white, fontSize: 13),
           ),
         ),
       ],
@@ -207,10 +201,11 @@ class _TopStatus extends StatelessWidget {
 }
 
 class _BottomControls extends StatelessWidget {
-  const _BottomControls(
-      {required this.onMicTap,
-      required this.onClose,
-      required this.immediateMic});
+  const _BottomControls({
+    required this.onMicTap,
+    required this.onClose,
+    required this.immediateMic,
+  });
   final bool immediateMic;
 
   final VoidCallback onMicTap;
@@ -223,26 +218,27 @@ class _BottomControls extends StatelessWidget {
       children: [
         const Text(
           '에이전트에게 말을 걸려면 마이크 버튼을 눌러 주세요.',
-          style: TextStyle(color: Colors.white60, fontSize: 12),
+          style: TextStyle(color: Color(0xFF111111), fontSize: 12),
         ),
         const SizedBox(height: 10),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             DescribedAction(
-                label: '음성 질문 시작',
-                description: '마이크를 켜서 음성으로 질문합니다.',
-                immediate: immediateMic,
-                onActivate: onMicTap,
-                child: _RoundButton(
-                  icon: Icons.mic,
-                  background: Colors.white.withValues(alpha: 0.12),
-                  onTap: onMicTap,
-                )),
+              label: '음성 질문 시작',
+              description: '마이크를 켜서 음성으로 질문합니다.',
+              immediate: immediateMic,
+              onActivate: onMicTap,
+              child: _RoundButton(
+                icon: Icons.mic,
+                background: const Color(0xFF111111),
+                onTap: onMicTap,
+              ),
+            ),
             const SizedBox(width: 28),
             _RoundButton(
               icon: Icons.close,
-              background: const Color(0xFFE53935),
+              background: const Color(0xFF111111),
               size: 64,
               onTap: onClose,
             ),

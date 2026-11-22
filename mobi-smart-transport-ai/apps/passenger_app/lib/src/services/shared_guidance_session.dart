@@ -1,8 +1,10 @@
 import '../models/v3_guidance_models.dart';
 import 'v3_agent_api_client.dart';
+import 'confirmed_ride_selection.dart';
 
 /// Memory-only route continuity. Never retains credentials, audio, BLE or leases.
 class SharedGuidanceSession {
+  final rideSelection = ConfirmedRideSelection();
   String? _owner;
   int _generation = 0;
   Future<V3GuidanceState>? _opening;
@@ -18,6 +20,7 @@ class SharedGuidanceSession {
   }
 
   void clear() {
+    rideSelection.invalidate();
     _generation++;
     _opening = null;
     _owner = null;
@@ -27,9 +30,21 @@ class SharedGuidanceSession {
 
   bool current(int generation) => _owner != null && generation == _generation;
 
+  int startNewConversation(V3GuidanceState fresh) {
+    final owner = _owner;
+    clear();
+    _owner = owner;
+    state = fresh;
+    return _generation;
+  }
+
   void save(int generation, V3GuidanceState? value, V3RoutePlanResponse? plan) {
     if (!current(generation)) return;
     final changed = selectionChanged(state, value);
+    if ((changed && !rideSelection.confirms(value)) ||
+        value?.state != 'WAITING_FOR_BUS') {
+      rideSelection.invalidate();
+    }
     routePlan = changed && identical(plan, routePlan) ? null : plan;
     state = value;
   }
@@ -40,6 +55,7 @@ class SharedGuidanceSession {
       (next == null ||
           previous.sessionId != next.sessionId ||
           previous.selectedRouteId != next.selectedRouteId ||
+          previous.selectedRouteNo != next.selectedRouteNo ||
           previous.selectedStopId != next.selectedStopId ||
           previous.selectedDestination != next.selectedDestination);
 
@@ -72,7 +88,11 @@ class SharedGuidanceSession {
         clear();
         throw StateError('Guidance session mismatch');
       }
-      if (selectionChanged(previous, result)) {
+      final changed = selectionChanged(previous, result);
+      if (result.state != 'WAITING_FOR_BUS' || changed) {
+        rideSelection.invalidate();
+      }
+      if (changed) {
         routePlan = null;
       }
       state = result;

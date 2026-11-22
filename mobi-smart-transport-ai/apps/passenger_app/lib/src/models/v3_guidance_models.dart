@@ -46,6 +46,7 @@ class V3GuidanceState {
     required this.geofenceArmed,
     required this.updatedAt,
     this.selectedDestination,
+    this.selectedPlan,
     this.selectedRouteNo,
     this.selectedRouteId,
     this.selectedStopId,
@@ -62,6 +63,7 @@ class V3GuidanceState {
   final bool geofenceArmed;
   final DateTime? updatedAt;
   final String? selectedDestination;
+  final V3RoutePlanCandidate? selectedPlan;
   final String? selectedRouteNo;
   final String? selectedRouteId;
   final String? selectedStopId;
@@ -79,6 +81,8 @@ class V3GuidanceState {
       geofenceArmed: json['geofenceArmed'] == true,
       updatedAt: _dateTimeValue(json['updatedAt']),
       selectedDestination: _nullableString(json['selectedDestination']),
+      selectedPlan: V3RoutePlanCandidate.fromNullableJson(
+          _mapValue(json['selectedPlan'])),
       selectedRouteNo: _nullableString(json['selectedRouteNo']),
       selectedRouteId: _nullableString(json['selectedRouteId']),
       selectedStopId: _nullableString(json['selectedStopId']),

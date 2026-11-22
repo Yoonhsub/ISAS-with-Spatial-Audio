@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobi_passenger_app/src/features/hardware_bus/concurrent_camera_panel.dart';
+import 'package:mobi_passenger_app/src/features/hardware_bus/door_beacon_test_config.dart';
 import 'package:mobi_passenger_app/src/local_vision/vision_codec.dart';
 import 'package:mobi_passenger_app/src/services/directional_guidance.dart';
 import 'package:mobi_passenger_app/src/services/head_tracking_direction.dart';
@@ -12,6 +13,8 @@ import 'package:mobi_passenger_app/src/services/speech_priority_coordinator.dart
 import 'package:mobi_passenger_app/src/widgets/described_action.dart';
 
 class Source extends ConcurrentCameraSource {
+  @override
+  String? get cameraFingerprint => 'test-camera|back|90';
   @override
   bool running = false;
   @override
@@ -70,10 +73,20 @@ class Output
         SpatialTestOutput,
         DirectionalCueOutput,
         InformationalDirectionalCueOutput,
-        HeadTrackedCueOutput {
+        HeadTrackedCueOutput,
+        ContinuousBeaconTargetOutput {
+  final beaconStarts = <({int interval, double angle, int sensorAge, int beaconAge})>[];
+  int beaconStops = 0;
   final cues = <TestDirection>[];
   final hrtf = <double>[];
   Completer<bool>? activeHrtf;
+  @override
+  Future<bool> syncBeaconTargetStream({required int intervalMs, required double azimuthDegrees, required int sensorAgeMs, required int beaconAgeMs}) async {
+    beaconStarts.add((interval: intervalMs, angle: azimuthDegrees, sensorAge: sensorAgeMs, beaconAge: beaconAgeMs));
+    return true;
+  }
+  @override
+  Future<bool> stopBeaconTargetStream() async { beaconStops++; return true; }
   @override
   Future<bool> playHeadTrackedCue(double azimuthDegrees) {
     hrtf.add(azimuthDegrees);
@@ -159,6 +172,9 @@ void main() {
     bool headTrackedAudioEnabled = false,
     HeadTrackingMountCalibration calibration =
         const HeadTrackingMountCalibration(),
+    DoorBeaconTestConfig doorBeaconTestConfig =
+        const DoorBeaconTestConfig.disabled(),
+    ValueListenable<DoorBeaconTestReceipt?>? doorBeaconReceipt,
   }) =>
       ActionSpeechScope(
         speech: priority,
@@ -179,6 +195,8 @@ void main() {
                 mountCalibration: calibration,
                 horizontalFovDegrees: fov,
                 headTrackedAudioEnabled: headTrackedAudioEnabled,
+                doorBeaconTestConfig: doorBeaconTestConfig,
+                doorBeaconReceipt: doorBeaconReceipt,
                 now: now,
                 playObservation: player,
               ),
@@ -346,6 +364,75 @@ void main() {
     expect(output.cues, [TestDirection.right]);
     expect(speech.spoken.any((s) => s.contains('버스 문')), isFalse);
     await t.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('door stream uses selected beacon cadence and a fresh matched WT door bearing only when injected', (t) async {
+    initialize();
+    final wt = HeadTrackingState();
+    var now = DateTime.utc(2026, 11, 22, 8);
+    void sample(DateTime at) => wt.publish(HeadTrackingSnapshot(
+      status: HeadTrackingStatus.ready, filteredYaw: 0, referenceYaw: 0, receivedAt: at,
+    ));
+    final receipt = ValueNotifier<DoorBeaconTestReceipt?>(null);
+    final config = DoorBeaconTestConfig.calibrated(
+      selectedBeaconId: 'TEST-BEACON', cameraFingerprint: 'test-camera|back|90',
+      horizontalFovDegrees: 68,
+      calibration: const HeadTrackingMountCalibration(
+        mount: HeadTrackingCameraMount.headMountedCamera,
+        axesAlignmentVerified: true, cameraAxisOffsetDegrees: 0,
+      ),
+    );
+    await t.pumpWidget(panel(
+      headTracking: wt, now: () => now, doorBeaconTestConfig: config,
+      doorBeaconReceipt: receipt,
+    ));
+    await tap(t, '카메라 시작');
+    for (var i = 0; i < 3; i++) {
+      now = now.add(const Duration(milliseconds: 10));
+      sample(now);
+      source.emit(receivedAt: now, boxes: const [
+        LocalBox('bus', .99, .05, .05, .9, .9),
+        LocalBox('bus_door', .99, .4, .4, .2, .3),
+      ]);
+      await t.pump();
+    }
+    receipt.value = DoorBeaconTestReceipt(
+      beaconId: 'TEST-BEACON', rssi: -75, receivedAt: now, scanGeneration: 1,
+    );
+    await tap(t, '화면 위치 소리 시작');
+    await t.pump(const Duration(milliseconds: 180));
+    expect(output.beaconStarts, isNotEmpty);
+    expect(output.beaconStarts.last.interval, 1050);
+    expect(output.beaconStarts.last.sensorAge, inInclusiveRange(0, 249));
+    expect(output.beaconStarts.last.beaconAge, inInclusiveRange(0, 1199));
+    expect(output.beaconStarts.last.angle.isFinite, isTrue);
+    receipt.value = DoorBeaconTestReceipt(
+      beaconId: 'TEST-BEACON', rssi: -75,
+      receivedAt: now.subtract(const Duration(seconds: 2)), scanGeneration: 1,
+    );
+    await t.pump(const Duration(milliseconds: 180));
+    expect(output.beaconStops, greaterThan(0));
+
+    receipt.value = DoorBeaconTestReceipt(
+      beaconId: 'TEST-BEACON', rssi: -75, receivedAt: now, scanGeneration: 1,
+    );
+    await t.pump(const Duration(milliseconds: 180));
+    final stopsBeforeUserStop = output.beaconStops;
+    await tap(t, '화면 위치 소리 중지');
+    await t.pump();
+    expect(output.beaconStops, greaterThan(stopsBeforeUserStop));
+    await tap(t, '화면 위치 소리 시작');
+    await t.pump(const Duration(milliseconds: 180));
+    source.emit(receivedAt: now.add(const Duration(milliseconds: 10)), boxes: const [
+      LocalBox('pole', .99, .3, .2, .2, .6),
+      LocalBox('bus', .99, .05, .05, .9, .9),
+      LocalBox('bus_door', .99, .4, .4, .2, .3),
+    ]);
+    await t.pump();
+    expect(output.beaconStops, greaterThan(0));
+    await t.pumpWidget(const SizedBox());
+    receipt.dispose();
+    wt.dispose();
   });
 
   testWidgets(

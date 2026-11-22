@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'diagnostic_button_label.dart';
+
 /// Accessibility-only enlarged controls. Sensor owners remain outside this view.
 class CompactControlSurface extends StatefulWidget {
   const CompactControlSurface(
@@ -84,7 +86,10 @@ class _CompactControlSurfaceState extends State<CompactControlSurface> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(widget.label),
-                FilledButton(onPressed: _open, child: const Text('확대 보기')),
+                FilledButton(
+                    onPressed: _open,
+                    child: const DiagnosticButtonLabel(
+                        Icons.open_in_full, '확대 보기')),
                 const Text('큰 글씨 제어는 대화상자에서 확인하세요. 센서 동작은 유지됩니다.'),
               ],
             )));

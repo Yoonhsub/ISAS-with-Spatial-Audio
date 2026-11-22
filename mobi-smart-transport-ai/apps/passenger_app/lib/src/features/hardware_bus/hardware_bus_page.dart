@@ -9,6 +9,7 @@ import 'continuous_beacon_scanner.dart';
 import 'wit_sensor_panel.dart';
 
 import 'diagnostic_action_hint.dart';
+import 'diagnostic_button_label.dart';
 
 import '../../widgets/described_action.dart';
 
@@ -243,7 +244,7 @@ class _HardwareBusPageState extends State<HardwareBusPage>
                   : signal == null
                       ? '스캔을 시작해주세요'
                       : '최근 수신 확인 안 됨 · 마지막 기록',
-              style: TextStyle(color: fresh ? Colors.teal : Colors.brown),
+              style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ],
         ),
@@ -267,7 +268,8 @@ class _HardwareBusPageState extends State<HardwareBusPage>
                       onPressed: _running || _busy || _stopping
                           ? null
                           : _requestPermissions,
-                      child: const Text('권한 허용'),
+                      child: const DiagnosticButtonLabel(
+                          Icons.verified_user_outlined, '권한 허용'),
                     )),
                 DescribedAction.button(
                     label: '버스 탐색 시작 (5분)',
@@ -278,7 +280,8 @@ class _HardwareBusPageState extends State<HardwareBusPage>
                       onPressed: _running || _busy || _stopping
                           ? null
                           : () => _start(duration: const Duration(minutes: 5)),
-                      child: const Text('버스 탐색 시작 (5분)'),
+                      child: const DiagnosticButtonLabel(
+                          Icons.sensors, '버스 탐색 시작 (5분)'),
                     )),
                 DiagnosticActionHint(
                     hint: '이 진단 조작을 실행합니다.',
@@ -286,7 +289,8 @@ class _HardwareBusPageState extends State<HardwareBusPage>
                       onPressed: _running
                           ? () => unawaited(_stop('사용자가 스캔을 중지했습니다.'))
                           : null,
-                      child: const Text('중지'),
+                      child: const DiagnosticButtonLabel(
+                          Icons.stop_circle_outlined, '중지'),
                     )),
               ],
             ),

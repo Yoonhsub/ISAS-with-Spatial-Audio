@@ -143,7 +143,9 @@ class V3AgentApiClient {
       _VisionLoginState state, String method, String path,
       {Map<String, Object?>? body,
       Map<String, String>? query,
-      bool leased = false}) async {
+      bool leased = false,
+      Duration responseTimeout = const Duration(seconds: 2),
+      int? expectedStatus}) async {
     state.check();
     final key = Uri.parse(baseUrl).origin;
     if (_visionFlights.containsKey(key)) {
@@ -179,15 +181,16 @@ class V3AgentApiClient {
         state.flight = null;
         state.flightSession = null;
       }
+      flight.finished.complete();
     }
 
     unawaited(raw.then<void>((_) => finished(),
         onError: (Object _, StackTrace __) => finished()));
     try {
       final response =
-          await raw.timeout(const Duration(seconds: 2), onTimeout: () {
+          await raw.timeout(responseTimeout, onTimeout: () {
         flight.cancel();
-        throw const VisionLeaseException(blocked: true);
+        throw const VisionLeaseException(blocked: true, timedOut: true);
       });
       state.check();
       if (leased) state.checkReceipt();
@@ -195,7 +198,18 @@ class V3AgentApiClient {
         final terminal =
             {400, 401, 403, 404, 409, 410, 422}.contains(response.statusCode);
         state.terminal = terminal;
-        throw VisionLeaseException(terminal: terminal);
+        throw VisionLeaseException(
+          terminal: terminal,
+          statusCode: response.statusCode,
+          validationArea: response.statusCode == 422 &&
+                  method == 'POST' &&
+                  path.endsWith('/phone-camera/events')
+              ? _phoneCameraValidationArea(response.body)
+              : null,
+        );
+      }
+      if (expectedStatus != null && response.statusCode != expectedStatus) {
+        throw VisionLeaseException(statusCode: response.statusCode);
       }
       final decoded = response.body.isEmpty
           ? <String, dynamic>{}
@@ -204,7 +218,8 @@ class V3AgentApiClient {
       return decoded;
     } on AuthenticatedApiException catch (error) {
       state.terminal = {401, 403, 499}.contains(error.statusCode);
-      throw VisionLeaseException(terminal: state.terminal);
+      throw VisionLeaseException(
+          terminal: state.terminal, statusCode: error.statusCode);
     } on VisionLeaseException {
       rethrow;
     } catch (_) {
@@ -323,9 +338,22 @@ class V3AgentApiClient {
   }
 
   Future<void> stopPassengerCamera(Map<String, dynamic> binding) async {
-    await _visionWire(_visionState(), 'DELETE',
-        '/ai-vision/v2/sessions/${Uri.encodeComponent(binding['sessionId'] as String)}/phone-camera/${binding['bindingId']}',
-        leased: true);
+    final state = _visionState()..checkReceipt();
+    final sessionId = binding['sessionId'] as String;
+    final revision = state.sessions[sessionId]?.revision;
+    final pending = state.flight;
+    if (pending != null) {
+      // The frame deadline can expire before its underlying transport finishes.
+      await pending.finished.future.timeout(const Duration(seconds: 2),
+          onTimeout: () => throw const VisionLeaseException(blocked: true));
+      state.checkReceipt();
+      if (state.sessions[sessionId]?.revision != revision) {
+        throw const VisionLeaseException(terminal: true);
+      }
+    }
+    await _visionWire(state, 'DELETE',
+        '/ai-vision/v2/sessions/${Uri.encodeComponent(sessionId)}/phone-camera/${binding['bindingId']}',
+        leased: true, responseTimeout: const Duration(seconds: 5), expectedStatus: 204);
   }
 
   Future<V3HealthStatus> fetchHealth() async {
@@ -971,6 +999,7 @@ class V3AgentApiClient {
 
 class _SafetyFlight {
   final abort = Completer<void>();
+  final finished = Completer<void>();
   void cancel() {
     if (!abort.isCompleted) abort.complete();
   }
@@ -1010,9 +1039,60 @@ class VisionLeaseLogin {
   }
 }
 
+// FastAPI's error includes submitted data. Only known validation categories
+// may leave this parser; even unknown field names and messages are discarded.
+String? _phoneCameraValidationArea(String body) {
+  if (body.length > 128 * 1024) return null;
+  try {
+    final decoded = jsonDecode(body);
+    final details = decoded is Map ? decoded['detail'] : null;
+    if (details is! List) return null;
+    final issues = <String>{};
+    for (final issue in details) {
+      if (issue is! Map || issue['loc'] is! List) continue;
+      final location = issue['loc'] as List;
+      if (location.isEmpty || location.first != 'body') continue;
+      final field = location.length > 1 ? location[1] : null;
+      final message = issue['msg'];
+      issues.add(switch (field) {
+        'detectionResult' when message == 'Value error, Bounding box exceeds normalized image boundary' => '객체 좌표 범위',
+        'detectionResult' => '객체 인식 결과 형식',
+        'capturedAt' || 'captureClock' => '촬영 시각 형식',
+        'frameIndex' || 'visionEventId' => '프레임 식별 형식',
+        'cameraId' || 'sessionId' || 'producerId' || 'bindingId' ||
+        'cameraEpoch' || 'sourceType' || 'envelopeVersion' => '카메라 전송 형식',
+        _ when message == 'Value error, Conflicting capture timestamps' => '촬영 시각 불일치',
+        _ when message == 'Value error, Input source disagrees with capture mode' => '카메라 입력 유형 불일치',
+        _ => '요청 형식',
+      });
+    }
+    if (issues.isEmpty) return null;
+    return issues.take(2).join(' · ');
+  } on FormatException {
+    return null;
+  }
+}
+
 class VisionLeaseException implements Exception {
-  const VisionLeaseException({this.terminal = false, this.blocked = false});
-  final bool terminal, blocked;
+  const VisionLeaseException(
+      {this.terminal = false, this.blocked = false, this.timedOut = false, this.statusCode,
+       this.validationArea});
+  final bool terminal, blocked, timedOut;
+  final int? statusCode;
+  final String? validationArea;
+
+  // Never include URLs, session identifiers, tokens or raw response bodies.
+  String get diagnosticCode {
+    final code = statusCode;
+    if (code != null && code >= 100 && code <= 599) {
+      final area = validationArea;
+      return area == null ? 'HTTP $code' : 'HTTP $code · $area';
+    }
+    if (terminal) return '인증·세션 확인 필요';
+    if (timedOut) return '서버 응답 시간 초과';
+    if (blocked) return '이전 요청 처리 중';
+    return '연결·응답 확인 필요';
+  }
   @override
   String toString() => terminal
       ? 'Vision 로그인 또는 세션이 유효하지 않습니다.'

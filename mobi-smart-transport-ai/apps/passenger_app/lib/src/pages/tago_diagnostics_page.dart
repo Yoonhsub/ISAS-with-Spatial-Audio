@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../features/hardware_bus/diagnostic_button_label.dart';
 import '../services/tago_diagnostics_client.dart';
 
 /// Explicit, read-only diagnostics against the configured authenticated backend.
@@ -122,13 +123,15 @@ class _TagoDiagnosticsPageState extends State<TagoDiagnosticsPage>
         Wrap(spacing: 8, runSpacing: 8, children: [
           FilledButton(
               onPressed: _busy ? null : () => _run('상태'),
-              child: const Text('서버 상태 조회')),
+              child:
+                  const DiagnosticButtonLabel(Icons.dns_outlined, '서버 상태 조회')),
           FilledButton(
               onPressed: _busy ? null : () => _run('도착'),
-              child: const Text('도착 조회')),
+              child: const DiagnosticButtonLabel(Icons.schedule, '도착 조회')),
           OutlinedButton(
               onPressed: _busy ? null : () => _run('위치'),
-              child: const Text('위치 조회')),
+              child: const DiagnosticButtonLabel(
+                  Icons.location_on_outlined, '위치 조회')),
         ]),
         Text(_notice),
       ]);
@@ -180,7 +183,10 @@ class _TagoDiagnosticsPageState extends State<TagoDiagnosticsPage>
       if (_request.isEmpty) const Text('아직 조회하지 않았습니다.'),
       if (_busy) ...[
         const LinearProgressIndicator(semanticsLabel: '진단 요청 중'),
-        OutlinedButton(onPressed: _cancel, child: const Text('결과 수신 중지')),
+        OutlinedButton(
+            onPressed: _cancel,
+            child: const DiagnosticButtonLabel(
+                Icons.stop_circle_outlined, '결과 수신 중지')),
       ],
       if (_notice.isNotEmpty) Semantics(liveRegion: true, child: Text(_notice)),
       if (result != null) ...[
@@ -201,7 +207,8 @@ class _TagoDiagnosticsPageState extends State<TagoDiagnosticsPage>
           Text('주의: ${result.warnings.first}',
               maxLines: 2, overflow: TextOverflow.ellipsis),
         OutlinedButton(
-            onPressed: () => _details(result), child: const Text('응답 상세 보기')),
+            onPressed: () => _details(result),
+            child: const DiagnosticButtonLabel(Icons.info_outline, '응답 상세 보기')),
       ],
     ]);
   }

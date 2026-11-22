@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 
 import 'live_caption_controller.dart';
 
-/// 오로라 위쪽에 표시되는 5줄 rolling 자막.
+/// 불투명한 고대비 패널에 표시되는 5줄 rolling 자막.
 /// 실제 렌더링 줄(TextPainter) 기준 최대 5줄만 보이고, 새 줄이 추가되면
-/// 기존 줄은 위로 밀려 올라가며 맨 위 줄은 흐려진다. 터치는 통과시킨다.
+/// 기존 줄은 위로 밀려 올라가며 모든 줄의 대비는 유지한다. 터치는 통과시킨다.
 class LiveCaptionOverlay extends StatelessWidget {
   const LiveCaptionOverlay({
     super.key,
@@ -18,10 +18,9 @@ class LiveCaptionOverlay extends StatelessWidget {
   final int maxVisibleLines;
 
   static const TextStyle _lineStyle = TextStyle(
-    color: Colors.white,
+    color: Color(0xFF111111),
     fontSize: 32,
     height: 1.35,
-    shadows: [Shadow(blurRadius: 6, color: Colors.black87)],
   );
 
   @override
@@ -40,12 +39,9 @@ class LiveCaptionOverlay extends StatelessWidget {
                   ? visual.sublist(visual.length - maxVisibleLines)
                   : visual;
               return Container(
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Colors.transparent, Color(0x66000000)],
-                  ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  border: Border.all(color: const Color(0xFF111111)),
                 ),
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                 child: AnimatedSize(
@@ -58,10 +54,8 @@ class LiveCaptionOverlay extends StatelessWidget {
                     children: [
                       for (var i = 0; i < shown.length; i++)
                         _AnimatedCaptionLine(
-                          // 맨 위 줄(0)은 더 흐리게 → fade out 느낌.
                           key: ValueKey(shown[i].key),
                           line: shown[i],
-                          topFade: i == 0 && visual.length > maxVisibleLines,
                         ),
                     ],
                   ),
@@ -74,7 +68,10 @@ class LiveCaptionOverlay extends StatelessWidget {
     );
   }
 
-  List<_VisualLine> _toVisualLines(List<LiveCaptionLine> entries, double maxWidth) {
+  List<_VisualLine> _toVisualLines(
+    List<LiveCaptionLine> entries,
+    double maxWidth,
+  ) {
     final out = <_VisualLine>[];
     for (var e = 0; e < entries.length; e++) {
       final entry = entries[e];
@@ -91,12 +88,14 @@ class LiveCaptionOverlay extends StatelessWidget {
       )..layout(maxWidth: maxWidth);
       final metrics = tp.computeLineMetrics();
       if (metrics.isEmpty) {
-        out.add(_VisualLine(
-          key: 'e$e-0-${entry.text.hashCode}',
-          speaker: entry.speaker,
-          text: full,
-          isFinal: entry.isFinal,
-        ));
+        out.add(
+          _VisualLine(
+            key: 'e$e-0-${entry.text.hashCode}',
+            speaker: entry.speaker,
+            text: full,
+            isFinal: entry.isFinal,
+          ),
+        );
         continue;
       }
       // 라인별 텍스트 경계를 위치로 추정해 분리한다.
@@ -110,24 +109,28 @@ class LiveCaptionOverlay extends StatelessWidget {
             .clamp(start, full.length);
         final segment = full.substring(start, endPos).trimRight();
         if (segment.isNotEmpty) {
-          out.add(_VisualLine(
-            key: 'e$e-$l-${segment.hashCode}',
-            speaker: entry.speaker,
-            text: segment,
-            isFinal: entry.isFinal,
-          ));
+          out.add(
+            _VisualLine(
+              key: 'e$e-$l-${segment.hashCode}',
+              speaker: entry.speaker,
+              text: segment,
+              isFinal: entry.isFinal,
+            ),
+          );
         }
         start = endPos;
       }
       if (start < full.length) {
         final tail = full.substring(start).trimRight();
         if (tail.isNotEmpty) {
-          out.add(_VisualLine(
-            key: 'e$e-tail-${tail.hashCode}',
-            speaker: entry.speaker,
-            text: tail,
-            isFinal: entry.isFinal,
-          ));
+          out.add(
+            _VisualLine(
+              key: 'e$e-tail-${tail.hashCode}',
+              speaker: entry.speaker,
+              text: tail,
+              isFinal: entry.isFinal,
+            ),
+          );
         }
       }
     }
@@ -150,31 +153,21 @@ class _VisualLine {
 }
 
 class _AnimatedCaptionLine extends StatelessWidget {
-  const _AnimatedCaptionLine({
-    super.key,
-    required this.line,
-    required this.topFade,
-  });
+  const _AnimatedCaptionLine({super.key, required this.line});
 
   final _VisualLine line;
-  final bool topFade;
 
   @override
   Widget build(BuildContext context) {
-    final baseOpacity = line.isFinal ? 0.95 : 0.62;
-    final opacity = topFade ? baseOpacity * 0.35 : baseOpacity;
     return TweenAnimationBuilder<double>(
-      // 새로 들어온 줄은 아래에서 위로 슬라이드 + 페이드 인.
+      // 새 줄은 위치만 전환하며 텍스트는 항상 불투명하게 유지한다.
       tween: Tween(begin: 0.0, end: 1.0),
       duration: const Duration(milliseconds: 260),
       curve: Curves.easeOut,
       builder: (context, t, child) {
-        return Opacity(
-          opacity: (opacity * t).clamp(0.0, 1.0),
-          child: Transform.translate(
-            offset: Offset(0, (1 - t) * 10),
-            child: child,
-          ),
+        return Transform.translate(
+          offset: Offset(0, (1 - t) * 10),
+          child: child,
         );
       },
       child: Padding(
@@ -183,11 +176,15 @@ class _AnimatedCaptionLine extends StatelessWidget {
           line.text,
           style: line.speaker == Speaker.thinking
               ? LiveCaptionOverlay._lineStyle.copyWith(
-                  color: Colors.white60,
+                  color: const Color(0xFF111111),
                   fontStyle: FontStyle.italic,
                   fontSize: 28,
                 )
-              : LiveCaptionOverlay._lineStyle,
+              : LiveCaptionOverlay._lineStyle.copyWith(
+                  fontWeight: line.isFinal
+                      ? FontWeight.w500
+                      : FontWeight.normal,
+                ),
         ),
       ),
     );

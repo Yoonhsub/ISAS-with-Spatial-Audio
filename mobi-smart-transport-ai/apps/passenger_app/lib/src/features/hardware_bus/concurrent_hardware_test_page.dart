@@ -12,8 +12,10 @@ import 'continuous_beacon_scanner.dart';
 import 'wit_sensor_panel.dart';
 import 'concurrent_camera_panel.dart';
 import 'concurrent_test_control.dart';
+import 'door_beacon_test_config.dart';
 
 import 'diagnostic_action_hint.dart';
+import 'diagnostic_button_label.dart';
 
 import '../../widgets/described_action.dart';
 
@@ -35,19 +37,25 @@ class ConcurrentHardwareTestPage extends StatefulWidget {
       this.settingsStore,
       this.cameraMountCalibration = const HeadTrackingMountCalibration(),
       this.cameraHorizontalFovDegrees = 0,
-      this.headTrackedAudioEnabled = false});
+      this.headTrackedAudioEnabled = false,
+      DoorBeaconTestConfig? doorBeaconTestConfig})
+      : _doorBeaconTestConfig = doorBeaconTestConfig;
   final SpatialVerificationEngine? engine;
   final HardwareTestSettingsStore? settingsStore;
   final BeaconScanner Function(String mac)? scannerFactory;
   final Future<bool> Function()? ensurePermission;
   final ConcurrentPanelBuilder? cameraBuilder;
   final Widget Function(Future<bool> Function())? sensorBuilder;
+
   /// Supplied only by a calibration owner that has measured this camera setup.
   /// Defaults deliberately disable HRTF in the diagnostic workspace.
   final HeadTrackingMountCalibration cameraMountCalibration;
   final double cameraHorizontalFovDegrees;
   // Caller grants this only after the user's explicit opt-in.
   final bool headTrackedAudioEnabled;
+  final DoorBeaconTestConfig? _doorBeaconTestConfig;
+  DoorBeaconTestConfig get doorBeaconTestConfig =>
+      _doorBeaconTestConfig ?? DoorBeaconTestConfig.deviceProfile;
   @override
   State<ConcurrentHardwareTestPage> createState() =>
       _ConcurrentHardwareTestPageState();
@@ -60,6 +68,8 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
   late final HardwareTestSettingsStore _settings;
   bool _settingsLoading = true, _settingsSaving = false;
   final _gate = ConcurrentObservationGate();
+  final ValueNotifier<DoorBeaconTestReceipt?> _doorBeaconReceipt =
+      ValueNotifier<DoorBeaconTestReceipt?>(null);
   late final SpatialVerificationEngine _engine;
   late final SpeechPriorityCoordinator _priority;
   Future<void>? _stopTask;
@@ -133,6 +143,7 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
   }
 
   Future<void> _startScan() async {
+    if (!_disposed) _doorBeaconReceipt.value = null;
     if (_settingsLoading ||
         _settingsSaving ||
         _running ||
@@ -185,6 +196,18 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
           _announced = false;
         }
         _watermark = _lastSeen = signal.lastDetectedAt;
+        final config = widget.doorBeaconTestConfig;
+        if (!_disposed) {
+          _doorBeaconReceipt.value = config.enabled &&
+                  signal.beaconId == config.selectedBeaconId
+              ? DoorBeaconTestReceipt(
+                  beaconId: signal.beaconId,
+                  rssi: signal.rssi,
+                  receivedAt: signal.lastDetectedAt.toUtc(),
+                  scanGeneration: revision,
+                )
+              : null;
+        }
         _show(
             '시연 매핑 일치: ${target.routeNo}번 · ${target.mac} · ${signal.rssi} dBm · 거리 UNKNOWN');
         if (_voice && !_announced && !_announcing) {
@@ -262,6 +285,7 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
     _running = false;
     _starting = false;
     _lastSeen = null;
+    if (!_disposed) _doorBeaconReceipt.value = null;
     _announced = false;
     _loss?.cancel();
     _loss = null;
@@ -531,7 +555,9 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
                                                       ? null
                                                       : _startScan,
                                                   child:
-                                                      const Text('버스 탐색 시작')))),
+                                                      const DiagnosticButtonLabel(
+                                                          Icons.sensors,
+                                                          '버스 탐색 시작')))),
                                       const SizedBox(width: 8),
                                       Expanded(
                                           child: DiagnosticActionHint(
@@ -542,8 +568,10 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
                                                       ? () => unawaited(_stopScan(
                                                           '사용자가 버스 탐색을 중지했습니다.'))
                                                       : null,
-                                                  child:
-                                                      const Text('버스 탐색 중지'))))
+                                                  child: const DiagnosticButtonLabel(
+                                                      Icons
+                                                          .stop_circle_outlined,
+                                                      '버스 탐색 중지'))))
                                     ]),
                                     DiagnosticActionHint(
                                         hint: '현재 진단 설정을 켜거나 끔니다.',
@@ -582,6 +610,8 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
                                 widget.cameraHorizontalFovDegrees,
                             headTrackedAudioEnabled:
                                 widget.headTrackedAudioEnabled,
+                            doorBeaconTestConfig: widget.doorBeaconTestConfig,
+                            doorBeaconReceipt: _doorBeaconReceipt,
                             playObservation: _play,
                             compact: true))),
           ])),
@@ -590,6 +620,7 @@ class _ConcurrentHardwareTestPageState extends State<ConcurrentHardwareTestPage>
   @override
   void dispose() {
     _disposed = true;
+    _doorBeaconReceipt.dispose();
     _foreground = false;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(() async {

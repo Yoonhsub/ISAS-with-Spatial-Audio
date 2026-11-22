@@ -10,6 +10,7 @@ import '../services/audio_haptic_cue_service.dart';
 import '../services/audio_shutdown.dart';
 
 import '../features/hardware_bus/diagnostic_action_hint.dart';
+import '../features/hardware_bus/diagnostic_button_label.dart';
 
 import '../widgets/described_action.dart';
 
@@ -356,7 +357,9 @@ class _SpatialState extends State<LocalSpatialVerificationPage>
                                         onPressed: ready
                                             ? () => _play(mode, direction)
                                             : null,
-                                        child: Text('$mode $direction')))
+                                        child: DiagnosticButtonLabel(
+                                            Icons.volume_up_outlined,
+                                            '$mode $direction')))
                             ]),
                           Text(widget.nativeStereoOnly
                               ? 'Android Stereo PCM Cue → 한국어 로컬 TTS · HRTF/실기기 청취 미검증'
@@ -377,7 +380,8 @@ class _SpatialState extends State<LocalSpatialVerificationPage>
                                       onPressed: ready
                                           ? () => _newGuidance(direction)
                                           : null,
-                                      child: Text(
+                                      child: DiagnosticButtonLabel(
+                                          Icons.hearing,
                                           '${direction.name.toUpperCase()} Cue → TTS'))),
                             DescribedAction.button(
                                 label: '방향 없는 TTS 안내',
@@ -387,7 +391,9 @@ class _SpatialState extends State<LocalSpatialVerificationPage>
                                 child: ElevatedButton(
                                     onPressed:
                                         ready ? () => _newGuidance(null) : null,
-                                    child: const Text('방향 없는 TTS 안내'))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.record_voice_over_outlined,
+                                        '방향 없는 TTS 안내'))),
                             DiagnosticActionHint(
                                 hint: '이 진단 조작을 실행합니다.',
                                 child: OutlinedButton(
@@ -404,25 +410,31 @@ class _SpatialState extends State<LocalSpatialVerificationPage>
                                 retapWindowAfterDescription: true,
                                 child: ElevatedButton(
                                     onPressed: ready ? _tts : null,
-                                    child: const Text('TTS 원본 출력'))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.record_voice_over_outlined,
+                                        'TTS 원본 출력'))),
                             DiagnosticActionHint(
                                 hint: '이 진단 조작을 실행합니다.',
                                 child: ElevatedButton(
                                     onPressed: ready ? _liveHold : null,
-                                    child: const Text('Live Hold 선점'))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.pause_circle_outline,
+                                        'Live Hold 선점'))),
                             DiagnosticActionHint(
                                 hint: '진단 음향을 즉시 중지합니다.',
                                 child: OutlinedButton(
                                     onPressed:
                                         !_stopping ? () => _stop('STOP') : null,
-                                    child: const Text('STOP'))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.stop_circle_outlined, 'STOP'))),
                             DiagnosticActionHint(
                                 hint: '이 진단 조작을 실행합니다.',
                                 child: OutlinedButton(
                                     onPressed: !_stopping
                                         ? () => _stop('SESSION_END', end: true)
                                         : null,
-                                    child: const Text('세션 종료'))),
+                                    child: const DiagnosticButtonLabel(
+                                        Icons.exit_to_app, '세션 종료'))),
                             DiagnosticActionHint(
                                 hint: '이 진단 조작을 실행합니다.',
                                 child: OutlinedButton(

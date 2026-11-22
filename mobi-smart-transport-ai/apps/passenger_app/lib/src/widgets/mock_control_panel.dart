@@ -69,10 +69,12 @@ class V3MockControlPanel extends StatelessWidget {
                 // smoke/unit tests; retain only user-facing repeat and refresh.
                 _Button(
                     label: 'Repeat Line',
+                    icon: Icons.replay,
                     onPressed: onRepeatScript,
                     isBusy: isBusy),
                 _Button(
                     label: '도착정보 갱신',
+                    icon: Icons.refresh,
                     onPressed: onRefreshArrivals,
                     isBusy: isBusy),
               ],
@@ -87,19 +89,22 @@ class V3MockControlPanel extends StatelessWidget {
 class _Button extends StatelessWidget {
   const _Button({
     required this.label,
+    required this.icon,
     required this.onPressed,
     required this.isBusy,
   });
 
   final String label;
+  final IconData icon;
   final VoidCallback onPressed;
   final bool isBusy;
 
   @override
   Widget build(BuildContext context) {
-    return OutlinedButton(
+    return OutlinedButton.icon(
       onPressed: isBusy ? null : onPressed,
-      child: Text(label),
+      icon: Icon(icon),
+      label: Text(label),
     );
   }
 }

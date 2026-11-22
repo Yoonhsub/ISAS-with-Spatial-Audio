@@ -7,9 +7,11 @@ class ContinuousBeaconScanner implements BeaconScanner {
   ContinuousBeaconScanner({
     required this.beaconIdResolver,
     this.scanTimeout = const Duration(seconds: 15),
+    this.smoothRssi = true,
     this.remoteIds = const ['C3:00:00:5C:B9:47', 'C3:00:00:5C:B9:48'],
   });
   final Duration scanTimeout;
+  final bool smoothRssi;
   final List<String> remoteIds;
 
   final BeaconIdResolver beaconIdResolver;
@@ -51,18 +53,14 @@ class ContinuousBeaconScanner implements BeaconScanner {
               (target != null && target.isNotEmpty && id != target)) {
             continue;
           }
-          final smoother = _smoothers.putIfAbsent(
-            id,
-            () => RssiMovingAverageSmoother(
-              windowSize: 5,
-              maxSingleSampleDelta: 10,
-              lostResetThreshold: 3,
-            ),
-          );
+          final rssi = smoothRssi
+              ? _smoothers.putIfAbsent(id, () => RssiMovingAverageSmoother())
+                  .addSample(result.rssi)
+              : result.rssi;
           controller.add(
             _estimator.buildSignal(
               beaconId: id,
-              rssi: smoother.addSample(result.rssi),
+              rssi: rssi,
               lastDetectedAt: result.timeStamp,
             ),
           );

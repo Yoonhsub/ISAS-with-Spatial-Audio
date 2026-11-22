@@ -35,8 +35,8 @@ class ToneTestEngine(context: Context) {
             if (track == null) return
             val now = SystemClock.elapsedRealtime()
             when {
-                now - startedAt >= 300000 -> stop("5분 안내 종료")
-                now - updatedAt > 1200 || now - sensorAt > 1200 -> stop("센서 수신 지연으로 중지")
+                renderState.pattern != "passenger_door" && now - startedAt >= 300000 -> stop("5분 안내 종료")
+                now - updatedAt > 1200 || (renderState.pattern != "passenger_door" && now - sensorAt > 1200) -> stop("센서 수신 지연으로 중지")
                 beaconAt != 0L && now - beaconAt >= 3000 -> stop("기준 비콘 수신이 끊겨 중지")
                 else -> applyRoute()
             }
@@ -51,11 +51,12 @@ class ToneTestEngine(context: Context) {
     )
 
     private fun validate(l: Double, r: Double, age: Int, interval: Int, beaconAge: Int, patternName: String, azimuth: Double?) {
-        require(azimuth == null || (azimuth.isFinite() && azimuth in -180.0..180.0 && patternName == "warning"))
-        require(azimuth == null || interval >= 250)
-        require(patternName == "target" || patternName == "warning") { "잘못된 소리 패턴" }
+        require(azimuth == null || (azimuth.isFinite() && azimuth in -180.0..180.0))
+        require(patternName == "target" || patternName == "warning" || patternName == "door_demo" || patternName == "passenger_door") { "잘못된 소리 패턴" }
+        require(patternName != "door_demo" || azimuth != null) { "현재 버스 문과 WT 방향을 확인해주세요." }
+        require(azimuth == null || patternName !in setOf("warning", "door_demo") || interval >= 250)
         require(l.isFinite() && r.isFinite() && l in 0.0..1.0 && r in 0.0..1.0)
-        require(age in 0..999) { "새 센서 각도를 수신한 뒤 시작해주세요." }
+        require(age in 0..999 || (patternName == "passenger_door" && age == -1 && (beaconAge in 0..2999 || (beaconAge == -1 && azimuth != null)))) { "새 센서 각도를 수신한 뒤 시작해주세요." }
         require(interval in 220..1400) { "잘못된 테스트음 간격" }
         require(beaconAge == -1 || beaconAge in 0..2999) { "기준 비콘을 다시 스캔해주세요." }
     }
@@ -63,7 +64,7 @@ class ToneTestEngine(context: Context) {
     fun start(l: Double, r: Double, age: Int, interval: Int, beaconAge: Int, patternName: String, azimuth: Double? = null): Map<String, Any> {
         stop("새 테스트 준비")
         validate(l, r, age, interval, beaconAge, patternName, azimuth)
-        if (azimuth != null) warningBank // Fail before acquiring focus if data is missing.
+        if (azimuth != null && patternName == "warning") warningBank // Fail before acquiring focus if data is missing.
         val outputs = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { isHeadphone(it) }
         val output = outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
             ?: outputs.firstOrNull()
@@ -80,12 +81,13 @@ class ToneTestEngine(context: Context) {
         try {
             val rate = 48000
             val minBuffer = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+            val bufferFloor = if (patternName == "passenger_door") rate * 4 * 120 / 1000 else 480 * 4 * 4
             val audio = AudioTrack.Builder().setAudioAttributes(attributes)
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(rate)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build())
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(maxOf(minBuffer, 480 * 4 * 4)).build()
+                .setBufferSizeInBytes(maxOf(minBuffer, bufferFloor)).build()
             track = audio
             check(audio.state == AudioTrack.STATE_INITIALIZED) { "오디오 장치 초기화 실패" }
             check(audio.setPreferredDevice(output)) { "이어폰 출력 경로 선택 실패" }
@@ -115,39 +117,54 @@ class ToneTestEngine(context: Context) {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             val chunkFrames = 480
             val pcm = ShortArray(chunkFrames * 2)
+            val beaconPulse = BeaconPulseRenderer(rate)
             val targetPulseFrames = (rate * 0.12).toInt()
+            var doorTone: DoorToneRenderer? = null
             val warningPulseFrames = (rate * 0.08).toInt()
             val warningSecondStart = (rate * 0.16).toInt()
             var frame = 0L
             var pulseStart = 0L
             var previous = renderState
-            var spatial = previous.azimuth?.let { SpatialWarningRenderer(warningBank, it) }
+            var spatial = if (previous.pattern == "warning") previous.azimuth?.let { SpatialWarningRenderer(warningBank, it) } else null
             try {
                 while (workerGeneration.get() == generation) {
                     val current = renderState
+                    val renderMode = selectToneRenderMode(current.pattern, current.azimuth)
                     if (previous.pattern != current.pattern || (previous.azimuth == null) != (current.azimuth == null)) {
                         pulseStart = frame
-                        spatial = current.azimuth?.let { SpatialWarningRenderer(warningBank, it) }
+                        beaconPulse.reset()
+                        spatial = if (current.pattern == "warning") current.azimuth?.let { SpatialWarningRenderer(warningBank, it) } else null
                     }
                     previous = current
-                    for (i in 0 until chunkFrames) {
-                        if (frame - pulseStart >= current.intervalMs.toLong() * rate / 1000) pulseStart = frame
-                        val phase = (frame - pulseStart).toInt()
-                        val warning = current.pattern == "warning"
-                        val pulseFrames = if (warning) warningPulseFrames else targetPulseFrames
-                        val localPhase = if (warning && phase >= warningSecondStart) phase - warningSecondStart else phase
-                        val sample = if (localPhase in 0 until pulseFrames) {
-                            val envelope = minOf(1.0, localPhase / 480.0, (pulseFrames - 1 - localPhase) / 480.0)
-                            val frequency = if (warning) 1100 else 700
-                            (sin(2 * PI * frequency * localPhase / rate) * envelope * 0.12 * Short.MAX_VALUE).toInt().toShort()
-                        } else 0.toShort()
-                        if (current.azimuth != null && spatial != null) {
-                            spatial.render(phase, current.azimuth, pcm, i * 2)
-                        } else {
-                            pcm[i * 2] = sample
-                            pcm[i * 2 + 1] = sample
+                    if (renderMode == ToneRenderMode.DOOR_DEMO_BINAURAL) {
+                        val renderer = doorTone ?: DoorToneRenderer(rate).also { doorTone = it }
+                        renderer.setAngle(current.azimuth!!)
+                    }
+                    if (current.pattern == "passenger_door" && current.azimuth == null) {
+                        beaconPulse.fill(pcm, current.intervalMs)
+                        frame += chunkFrames
+                    } else {
+                        for (i in 0 until chunkFrames) {
+                            if (frame - pulseStart >= current.intervalMs.toLong() * rate / 1000) pulseStart = frame
+                            val phase = (frame - pulseStart).toInt()
+                            val warning = current.pattern == "warning"
+                            val pulseFrames = if (warning) warningPulseFrames else targetPulseFrames
+                            val localPhase = if (warning && phase >= warningSecondStart) phase - warningSecondStart else phase
+                            val sample = if (localPhase in 0 until pulseFrames) {
+                                val envelope = minOf(1.0, localPhase / 480.0, (pulseFrames - 1 - localPhase) / 480.0)
+                                val frequency = if (warning) 1100 else 700
+                                (sin(2 * PI * frequency * localPhase / rate) * envelope * 0.12 * Short.MAX_VALUE).toInt().toShort()
+                            } else 0.toShort()
+                            if (renderMode == ToneRenderMode.DOOR_DEMO_BINAURAL) {
+                                doorTone!!.render(phase, pcm, i * 2)
+                            } else if (current.azimuth != null && spatial != null) {
+                                spatial.render(phase, current.azimuth, pcm, i * 2)
+                            } else {
+                                pcm[i * 2] = sample
+                                pcm[i * 2 + 1] = sample
+                            }
+                            frame++
                         }
-                        frame++
                     }
                     var offset = 0
                     while (offset < pcm.size && workerGeneration.get() == generation) {

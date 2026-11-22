@@ -92,7 +92,7 @@ class _AppNavigationBarState extends State<AppNavigationBar> {
 
   @override
   Widget build(BuildContext context) => Material(
-        color: const Color(0xFFF6F8FB),
+        color: Theme.of(context).colorScheme.surface,
         child: SafeArea(
             bottom: false,
             child: Column(children: [
@@ -101,7 +101,7 @@ class _AppNavigationBarState extends State<AppNavigationBar> {
                   builder: (context, _, __) {
                     final enabled = !navigating &&
                         (!widget.atHome || widget.observer.routes.length > 1);
-                    return Row(children: [
+                    return Wrap(alignment: WrapAlignment.center, children: [
                       TextButton.icon(
                           label: const Text('뒤로 가기'),
                           onPressed: enabled ? () => go(false) : null,

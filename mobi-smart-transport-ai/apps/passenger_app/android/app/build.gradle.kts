@@ -101,7 +101,7 @@ android {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.mobi_passenger_app"
         if (offlineCamera) applicationIdSuffix = ".offlinevision"
-        if (doorDemo) applicationIdSuffix = ".doordemo"
+        if (doorDemo) applicationIdSuffix = ".phoneimu.doordemo"
         if (localBackend) applicationIdSuffix = ".localbackend"
         if (localAudio) applicationIdSuffix = ".localaudio"
         if (localCameraBackend) applicationIdSuffix = ".localvision"
@@ -124,7 +124,7 @@ android {
                 xmlns:tools="http://schemas.android.com/tools">
                 <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
                 <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
-                <application ${if (doorDemo) """android:label="MOBI 문 방향 시연" tools:replace="android:label"""" else ""}>
+                <application ${if (doorDemo) """android:label="MOBI 내장 센서 시연" tools:replace="android:label"""" else ""}>
                     <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
                 </application>
             </manifest>

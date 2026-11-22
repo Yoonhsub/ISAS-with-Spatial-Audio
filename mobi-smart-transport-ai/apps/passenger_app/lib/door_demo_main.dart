@@ -119,7 +119,7 @@ class _DoorDemoPageState extends State<DoorDemoPage> {
   Widget build(BuildContext context) {
     if (!_ready) {
       return Scaffold(
-          appBar: AppBar(title: const Text('MOBI 문 방향 시연')),
+          appBar: AppBar(title: const Text('MOBI 내장 센서 시연')),
           body: Padding(
               padding: const EdgeInsets.all(24),
               child: Column(
@@ -130,7 +130,7 @@ class _DoorDemoPageState extends State<DoorDemoPage> {
                           _directionOnly = true;
                           _ready = true;
                         }),
-                        child: const Text('비컨 없이 WT901 방향 테스트')),
+                        child: const Text('비컨 없이 내장 센서 방향 테스트')),
                     const Text('목표 비컨 A · $beaconA'),
                     Text(_message),
                     FilledButton(
@@ -144,6 +144,7 @@ class _DoorDemoPageState extends State<DoorDemoPage> {
       Expanded(
           child: LocalVisionPage(
               doorDemo: true,
+              phoneImu: true,
               directionOnly: _directionOnly,
               bundledModel: true,
               previewPriority: _priority,

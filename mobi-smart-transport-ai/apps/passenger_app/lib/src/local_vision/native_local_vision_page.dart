@@ -14,6 +14,7 @@ import '../services/v3_agent_api_client.dart';
 import '../services/speech_priority_coordinator.dart';
 import '../services/spatial_verification_engine.dart';
 import '../services/vision_screen_audio.dart';
+import '../services/head_tracking_direction.dart';
 import '../widgets/vision_screen_audio_panel.dart';
 import '../features/hardware_bus/wit_sensor_panel.dart';
 
@@ -35,6 +36,7 @@ class LocalVisionPage extends StatefulWidget {
       this.bundledModel = false,
       this.doorDemo = false,
       this.directionOnly = false,
+      this.phoneImu = false,
       this.previewPriority,
       this.previewEngine,
       this.previewScope = 'camera-preview',
@@ -53,6 +55,7 @@ class LocalVisionPage extends StatefulWidget {
   final bool bundledModel;
   final bool doorDemo;
   final bool directionOnly;
+  final bool phoneImu;
   final SpeechPriorityCoordinator? previewPriority;
   final SpatialVerificationEngine? previewEngine;
   final String previewScope;
@@ -73,6 +76,51 @@ class _LocalVisionPageState extends State<LocalVisionPage>
   final _runTime = Stopwatch();
   late final FramePump _pump;
   VisionScreenAudio? _previewAudio;
+  static const _phoneEvents = EventChannel('mobi.passenger/phone-camera-heading');
+  HeadTrackingState? _phoneState;
+  StreamSubscription<dynamic>? _phoneEventsSub;
+
+  void _listenToPhone(int generation) {
+    final state = _phoneState!;
+    _phoneEventsSub = _phoneEvents.receiveBroadcastStream().listen((event) {
+      if (_disposing || generation != _generation) return;
+      if (event == null) {
+        state.publish(const HeadTrackingSnapshot(status: HeadTrackingStatus.stale,
+            message: '후면 카메라를 정면으로 향하고 다시 보정하세요'));
+        return;
+      }
+      final yaw = (event['yaw'] as num).toDouble();
+      final reference = state.snapshot.referenceYaw;
+      state.publish(HeadTrackingSnapshot(
+          status: reference == null ? HeadTrackingStatus.connectedUncalibrated : HeadTrackingStatus.ready,
+          rawYaw: yaw, filteredYaw: yaw, referenceYaw: reference,
+          receivedAt: DateTime.fromMillisecondsSinceEpoch(event['at'] as int, isUtc: true)));
+    }, onError: (Object error) {
+      if (!_disposing && generation == _generation) {
+        state.publish(const HeadTrackingSnapshot(status: HeadTrackingStatus.error,
+            message: '내장 회전 센서를 사용할 수 없습니다'));
+      }
+    });
+  }
+
+  bool _freshPhoneSample(HeadTrackingSnapshot snap) {
+    final age = snap.age(DateTime.now().toUtc());
+    return snap.filteredYaw != null && age != null && !age.isNegative &&
+        age < maximumHeadSampleAgeForCue;
+  }
+
+  void _calibratePhone() {
+    final state = _phoneState!;
+    final snap = state.snapshot;
+    if (!_pump.active || !_freshPhoneSample(snap)) return;
+    final audio = _previewAudio!;
+    audio.setHeadTrackingMount(HeadTrackingCameraMount.headMountedCamera);
+    audio.setMountAlignment(verified: true, cameraAxisOffsetDegrees: 0);
+    state.publish(HeadTrackingSnapshot(status: HeadTrackingStatus.ready,
+        rawYaw: snap.rawYaw, filteredYaw: snap.filteredYaw,
+        referenceYaw: snap.filteredYaw, receivedAt: snap.receivedAt));
+    audio.setHeadTrackingEnabled(true);
+  }
   StreamSubscription<int?>? _beaconRssiSubscription;
   final _history = DetectedFrameHistory();
   bool get _automaticPreviewAudio =>
@@ -147,7 +195,9 @@ class _LocalVisionPageState extends State<LocalVisionPage>
       unawaited(_stop(reason: '로그인 상태를 확인할 수 없어 카메라를 중지했습니다'));
     });
     if (widget.previewPriority != null && widget.previewEngine != null) {
+      if (widget.phoneImu) _phoneState = HeadTrackingState();
       _previewAudio = VisionScreenAudio(
+          headTracking: _phoneState,
           priority: widget.previewPriority!,
           engine: widget.previewEngine!,
           sessionGeneration: widget.previewScope,
@@ -325,6 +375,7 @@ class _LocalVisionPageState extends State<LocalVisionPage>
         return;
       }
       _pump.start();
+      if (widget.phoneImu) _listenToPhone(generation);
       if (_automaticPreviewAudio) _previewAudio?.setEnabled(true);
       _runTime
         ..reset()
@@ -403,6 +454,9 @@ class _LocalVisionPageState extends State<LocalVisionPage>
     if (_stopping != null) return _stopping!;
     _generation++;
     final camera = _camera, worker = _worker;
+    final phoneStop = _phoneEventsSub?.cancel();
+    _phoneEventsSub = null;
+    if (!_disposing) _phoneState?.resetForSession();
     _camera = null;
     _worker = null;
     _runTime.stop();
@@ -419,6 +473,7 @@ class _LocalVisionPageState extends State<LocalVisionPage>
         await camera?.dispose();
       } catch (_) {/* already disconnected */}
       await idle;
+      await phoneStop;
       await worker?.close();
       await previewStop;
       try {
@@ -461,6 +516,7 @@ class _LocalVisionPageState extends State<LocalVisionPage>
     _previewAudio?.dispose(); // Retire UI callbacks before any lease release.
     unawaited(_stop());
     _pump.dispose();
+    _phoneState?.dispose();
     _model = null;
     super.dispose();
   }
@@ -576,14 +632,26 @@ class _LocalVisionPageState extends State<LocalVisionPage>
                             : _start,
                         child: const Text('카메라 시작'))),
               ]),
-              if (_previewAudio != null)
+              if (widget.phoneImu && _previewAudio != null)
+                ListenableBuilder(listenable: _previewAudio!, builder: (context, _) {
+                  final audio = _previewAudio!;
+                  final snap = _phoneState!.snapshot;
+                  return Column(children: [
+                    const Text('휴대폰을 머리에 고정하고 후면 카메라와 얼굴을 같은 정면으로 향하세요.'),
+                    FilledButton(onPressed: _pump.active && _freshPhoneSample(snap) ? _calibratePhone : null,
+                        child: const Text('현재 방향을 정면으로 보정')),
+                    Text(snap.status == HeadTrackingStatus.error || snap.status == HeadTrackingStatus.stale
+                        ? snap.message : audio.headTrackingEnabled ? audio.demoPhase : '정면 보정 대기'),
+                  ]);
+                })
+              else if (_previewAudio != null)
                 VisionScreenAudioPanel(
                     audio: _previewAudio!,
                     cameraActive: _pump.active,
                     showStopButton: false,
                     diagnostics: widget.remoteApi == null,
                     automaticallyEnabled: _automaticPreviewAudio),
-              if (_previewAudio != null && widget.remoteApi == null)
+              if (_previewAudio != null && widget.remoteApi == null && !widget.phoneImu)
                 ExpansionTile(
                     title: const Text('WT901 Head Tracking (기본 OFF)'),
                     subtitle: const Text('센서 연결·정면 보정·검증된 카메라 화각이 모두 필요'),
@@ -607,7 +675,7 @@ class _LocalVisionPageState extends State<LocalVisionPage>
                             }
                           },
                     child: const Text('세션 종료 · 카메라/전송 중지')),
-              SwitchListTile(
+              if (!widget.phoneImu) SwitchListTile(
                   title: const Text('전면 카메라 사용'),
                   value: _front,
                   onChanged: busy || _camera != null

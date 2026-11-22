@@ -12,6 +12,7 @@ import io.flutter.plugin.common.MethodChannel
 import kotlin.math.atan
 
 open class HardwareBusActivity : FlutterActivity() {
+    private var phoneHeading: PhoneCameraHeading? = null
     private var tone: ToneTestEngine? = null
     private var pending: MethodChannel.Result? = null
     private fun permissions(): Array<String> = if (Build.VERSION.SDK_INT >= 31) arrayOf(
@@ -75,6 +76,12 @@ open class HardwareBusActivity : FlutterActivity() {
     }
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        if (packageName.endsWith(".doordemo")) {
+            phoneHeading = PhoneCameraHeading(this).also {
+                io.flutter.plugin.common.EventChannel(flutterEngine.dartExecutor.binaryMessenger,
+                    "mobi.passenger/phone-camera-heading").setStreamHandler(it)
+            }
+        }
         tone = ToneTestEngine(this)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mobi.passenger/hardware-tone").setMethodCallHandler { call, result ->
             try {
@@ -134,6 +141,7 @@ open class HardwareBusActivity : FlutterActivity() {
         super.onPause()
     }
     override fun onDestroy() {
+        phoneHeading?.stop()
         tone?.stop("앱 종료")
         super.onDestroy()
     }

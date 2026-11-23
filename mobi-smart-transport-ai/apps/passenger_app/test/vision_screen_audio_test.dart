@@ -1417,6 +1417,61 @@ void main() {
     await engine.dispose();
   });
 
+  testWidgets('locked left door moves to the right after the phone turns past it', (t) async {
+    final head = _HeadPort();
+    final engine = SpatialVerificationEngine(
+        NativeDirectionalCueOutput(port: native.Port(), headTrackedPort: head),
+        speech.FakeTts());
+    final priority = SpeechPriorityCoordinator(engine);
+    var now = 0;
+    final capturedAt = DateTime.now().toUtc();
+    final sensor = HeadTrackingState();
+    void heading(double degrees) => sensor.publish(HeadTrackingSnapshot(
+        status: HeadTrackingStatus.ready,
+        rawYaw: degrees,
+        filteredYaw: degrees,
+        referenceYaw: 0,
+        receivedAt: capturedAt));
+    final audio = VisionScreenAudio(
+        priority: priority,
+        engine: engine,
+        sessionGeneration: 'left-door',
+        isCurrent: () => true,
+        headTracking: sensor,
+        ccwPositiveYaw: true,
+        doorDemo: true,
+        directionOnly: true,
+        continuousBeaconTone: true,
+        requireDoorInBus: false,
+        confirmationFrames: 1,
+        horizontalFovDegrees: 70,
+        nowMicros: () => now);
+    heading(0);
+    audio
+      ..setEnabled(true)
+      ..setHeadTrackingMount(HeadTrackingCameraMount.headMountedCamera)
+      ..setMountAlignment(verified: true, cameraAxisOffsetDegrees: 0)
+      ..setHeadTrackingEnabled(true);
+    audio.observe(
+        detection(++now, boxes: const [
+          LocalBox('bus_door', .92, .1, .2, .2, .4),
+        ]).toDetectionResult(),
+        receivedAt: capturedAt,
+        age: Duration.zero);
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(-21, .01));
+    heading(21);
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(0, .01));
+    heading(45);
+    await flush(t);
+    expect(head.argsHistory.last['azimuthDegrees'], closeTo(24, .01));
+    await audio.stop();
+    audio.dispose();
+    priority.dispose();
+    await engine.dispose();
+  });
+
   testWidgets('door demo gates camera direction on target beacon reception', (t) async {
     final head = _HeadPort();
     final engine = SpatialVerificationEngine(

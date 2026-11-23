@@ -642,6 +642,9 @@ class _LocalVisionPageState extends State<LocalVisionPage>
                         child: const Text('현재 방향을 정면으로 보정')),
                     Text(snap.status == HeadTrackingStatus.error || snap.status == HeadTrackingStatus.stale
                         ? snap.message : audio.headTrackingEnabled ? audio.demoPhase : '정면 보정 대기'),
+                    if (audio.diagnostic['correctedAngleDegrees'] is num)
+                      Text('문 방향 ${((audio.diagnostic['correctedAngleDegrees'] as num).toDouble()).toStringAsFixed(0)}°'
+                          ' · 휴대폰 회전 ${snap.filteredYaw?.toStringAsFixed(0) ?? '-'}°'),
                   ]);
                 })
               else if (_previewAudio != null)

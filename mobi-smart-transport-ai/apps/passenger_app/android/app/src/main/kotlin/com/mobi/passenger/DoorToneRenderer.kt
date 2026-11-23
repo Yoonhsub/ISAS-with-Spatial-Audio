@@ -35,8 +35,10 @@ internal class DoorToneRenderer(private val rate: Int) {
         val delay = side * .00066 * rate
         leftDelay = maxOf(0.0, delay)
         rightDelay = maxOf(0.0, -delay)
-        // Keep some crossfeed at the sides, with greater separation near the front.
-        val pan = .96 * tanh(2.4 * side) / tanh(2.4)
+        // This cue is used as a directional instruction, not ambient stereo.  Make
+        // modest off-centre angles unambiguous on ordinary earphones: ±15° already
+        // gives the near ear roughly 12 dB more energy than the far ear.
+        val pan = .98 * tanh(6.0 * side) / tanh(6.0)
         leftGain = sqrt((1 - pan) / 2)
         rightGain = sqrt((1 + pan) / 2)
         val rearTreble = 1 - .40 * maxOf(0.0, -cos(radians))

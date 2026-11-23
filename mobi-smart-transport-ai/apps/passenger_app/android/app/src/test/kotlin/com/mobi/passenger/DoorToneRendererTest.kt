@@ -32,4 +32,16 @@ class DoorToneRendererTest {
             (right.indices step 2).first { right[it].toInt() != 0 })
         assertTrue(right.takeLast(100).all { it.toInt() == 0 })
     }
+
+    @Test fun aSmallRightTurnIsClearlyRightWeighted() {
+        val right = pulse(15.0)
+        var nearEnergy = 0.0
+        var farEnergy = 0.0
+        for (i in right.indices step 2) {
+            nearEnergy += right[i + 1].toDouble() * right[i + 1]
+            farEnergy += right[i].toDouble() * right[i]
+        }
+        // 12 dB is a fourfold amplitude / sixteenfold energy distinction.
+        assertTrue(nearEnergy > 15 * farEnergy)
+    }
 }

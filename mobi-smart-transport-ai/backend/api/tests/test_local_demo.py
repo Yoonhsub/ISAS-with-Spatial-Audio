@@ -71,7 +71,8 @@ def test_regular_mode_does_not_synthesize_driver(monkeypatch):
     storage.set('/localDemoAssignments/MOCK-502', {'busNo': '502', 'driverId': 'synthetic-driver'})
     marker = current_principal.set(Principal('passenger', 'passenger'))
     try:
-        record = RideRequestService(storage).create(RideRequestCreate(
-            userId='passenger', stopId='mock-stop-001', routeId='MOCK-502', busNo='502'))
-        assert record.targetDriverId is None
+        with pytest.raises(HTTPException) as error:
+            RideRequestService(storage).create(RideRequestCreate(
+                userId='passenger', stopId='mock-stop-001', routeId='MOCK-502', busNo='502'))
+        assert error.value.status_code == 409
     finally: current_principal.reset(marker)

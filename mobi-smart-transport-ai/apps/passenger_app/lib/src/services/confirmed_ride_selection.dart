@@ -29,8 +29,9 @@ class ConfirmedRideSelection extends ValueNotifier<RideRequestDraft?> {
     value = null;
   }
 
-  void restore(RideRequestDraft draft) {
+  void restore(RideRequestDraft draft, {V3GuidanceState? state}) {
     invalidate();
+    _confirmedState = state;
     _revoked = Completer<void>();
     value = draft;
   }

@@ -12,7 +12,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <application
-        android:label="mobi_passenger_app"
+        android:label="MOBI_Finals_승객"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

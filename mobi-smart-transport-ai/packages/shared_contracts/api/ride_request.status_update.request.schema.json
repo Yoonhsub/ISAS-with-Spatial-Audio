@@ -11,7 +11,7 @@
       "enum": [
         "WAITING",
         "NOTIFIED",
-        "ACCEPTED",
+        "ACCEPTED", "DENIED",
         "ARRIVED",
         "COMPLETED",
         "CANCELLED"

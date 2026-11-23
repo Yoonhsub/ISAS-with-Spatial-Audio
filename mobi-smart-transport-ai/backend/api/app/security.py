@@ -52,6 +52,8 @@ POLICY = {
     ("DELETE", "/ai-vision/v2/cameras/{cameraId}/bindings/{bindingId}"): {"admin"},
     ("POST", "/ai-vision/v2/events"): {"vision_producer"},
     ("POST", "/ride-requests"): {"passenger", "admin"},
+    ("POST", "/ride-requests/{requestId}/transfer"): {"passenger"},
+    ("GET", "/ride-requests"): {"passenger", "admin"},
     ("GET", "/ride-requests/{requestId}"): {"passenger", "driver", "admin"},
     ("PATCH", "/ride-requests/{requestId}/status"): {"passenger", "driver", "admin"},
     ("GET", "/drivers/{driverId}/ride-requests"): {"driver", "admin"},

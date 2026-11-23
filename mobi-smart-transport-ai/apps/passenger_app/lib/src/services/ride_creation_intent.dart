@@ -7,6 +7,34 @@ import 'backend_api_client.dart';
 
 /// Durable unresolved user action. No credentials are stored here.
 class RideCreationIntentStore {
+  String _transferSlot(String uid) => 'mobi.ride.transfer.v1.${Uri.encodeComponent(uid)}';
+
+  Future<Map<String, String>?> pendingTransfer(String uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final raw = prefs.getString(_transferSlot(uid));
+    return raw == null ? null : Map<String, String>.from(jsonDecode(raw) as Map);
+  }
+
+  Future<void> beginTransfer(String uid, String parent, String busNo) async {
+    final pending = await pendingTransfer(uid);
+    if (pending != null && (pending['requestId'] != parent || pending['busNo'] != busNo)) {
+      throw StateError('이전 환승 요청 결과를 먼저 확인해 주세요.');
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (!await prefs.setString(_transferSlot(uid), jsonEncode({'requestId': parent, 'busNo': busNo}))) {
+      throw StateError('환승 재시도 정보를 저장하지 못했습니다.');
+    }
+  }
+
+  Future<void> completeTransfer(String uid, String parent) async {
+    final pending = await pendingTransfer(uid);
+    if (pending?['requestId'] == parent) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_transferSlot(uid));
+    }
+  }
+
   String _slot(String uid) =>
       'mobi.ride.pending.v1.${Uri.encodeComponent(uid)}';
 
@@ -26,6 +54,16 @@ class RideCreationIntentStore {
     final prefs = await SharedPreferences.getInstance();
     if (!await prefs.setString(_activeSlot(uid), requestId)) {
       throw StateError('새로고침 복구 정보를 저장하지 못했습니다. 요청 ID: $requestId');
+    }
+  }
+
+  Future<void> clearActive(String uid, String requestId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    if (prefs.getString(_activeSlot(uid)) != requestId) return;
+    for (final key in prefs.getKeys().where((key) =>
+        key == _activeSlot(uid) || key.startsWith('${_activeSlot(uid)}.session.'))) {
+      if (prefs.getString(key) == requestId) await prefs.remove(key);
     }
   }
 

@@ -65,6 +65,9 @@ class LiveVoiceController {
   final ValueNotifier<double> level = ValueNotifier<double>(0.0);
   final ValueNotifier<double> shaderMode = ValueNotifier<double>(0.0);
   final ValueNotifier<bool> muted = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> microphoneActive = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> microphoneFinishing = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> microphoneUnavailable = ValueNotifier<bool>(false);
 
   static const String _goodbye = '지금 수행할 작업은 없는 것 같습니다. 언제든 필요하면 다시 불러 주세요.';
   static const Duration _inactivityTimeout = Duration(seconds: 12);
@@ -78,6 +81,7 @@ class LiveVoiceController {
   Timer? _speechRecoveryTimer;
   Timer? _inactivityTimer;
   Timer? _partialCommitTimer;
+  Timer? _recognitionEndTimer;
   bool _isCommitting = false;
   bool _isInterrupting = false;
   bool _disposed = false;
@@ -102,16 +106,44 @@ class LiveVoiceController {
   }
 
   Future<bool> _startRecognition() async {
-    return _recognizer.start(
-      localeId: 'ko_KR',
-      onResult: _onSpeechResult,
-      onState: _onSpeechState,
-    );
+    try {
+      final started = await _recognizer.start(
+        localeId: 'ko_KR',
+        onResult: _onSpeechResult,
+        onState: _onSpeechState,
+      );
+      if (_disposed) return false;
+      if (!started) {
+        microphoneUnavailable.value = true;
+        _setState(VoiceTurnState.idle);
+      } else {
+        _updateMicrophoneStatus();
+      }
+      return started;
+    } catch (_) {
+      if (!_disposed) {
+        microphoneUnavailable.value = true;
+        _setState(VoiceTurnState.idle);
+      }
+      return false;
+    }
+  }
+
+  void _updateMicrophoneStatus() {
+    if (_disposed) return;
+    final active = state.value == VoiceTurnState.listening &&
+        !muted.value &&
+        _recognizer.isListening;
+    microphoneActive.value = active;
+    if (active) microphoneUnavailable.value = false;
   }
 
   void _setState(VoiceTurnState next) {
     if (_disposed) return;
     state.value = next;
+    microphoneFinishing.value = false;
+    if (next != VoiceTurnState.listening) microphoneActive.value = false;
+    if (next != VoiceTurnState.listening) _recognitionEndTimer?.cancel();
     shaderMode.value = next.shaderMode;
     // 웹은 캡처/WS를 계속 유지하고, 듣기 상태가 아닐 때 들어온 결과는 Dart에서 무시한다.
     _recognizer.setActive(next == VoiceTurnState.listening);
@@ -145,14 +177,17 @@ class LiveVoiceController {
     }
 
     _partialCommitTimer?.cancel();
+    _recognitionEndTimer?.cancel();
     _inactivityTimer?.cancel();
     _partial = '';
+    microphoneUnavailable.value = false;
     _setState(VoiceTurnState.listening);
     _listeningSince = DateTime.now();
     // 사용자 제스처 컨텍스트에서 마이크를 복구한다(iOS의 AudioContext suspend/WS 종료 회복).
     _recognizer.setActive(true);
     final ok = _recognizer.resume();
     if (!ok) unawaited(_startRecognition());
+    _updateMicrophoneStatus();
     _resetInactivityTimer();
   }
 
@@ -162,6 +197,7 @@ class LiveVoiceController {
       _listeningSince = DateTime.now();
       _recognizer.resume();
     }
+    _updateMicrophoneStatus();
   }
 
   // ---- 프레임 틱: 오로라 레벨 ----
@@ -235,19 +271,56 @@ class LiveVoiceController {
 
   void _onSpeechState(String s) {
     if (_disposed || _ending) return;
-    if (s == 'listening') return;
-    if (s == 'ready' || s == 'recovering') return;
+    if (s == 'listening' || s == 'ready') {
+      microphoneFinishing.value = false;
+      _recognitionEndTimer?.cancel();
+      _updateMicrophoneStatus();
+      return;
+    }
+    if (s == 'recovering') {
+      microphoneActive.value = false;
+      return;
+    }
     if (s == 'closed' || s == 'resumeBlocked' || s.startsWith('error')) {
+      microphoneActive.value = false;
       if (state.value == VoiceTurnState.listening) {
+        if (!_recognizer.isContinuous) {
+          // Native errors are terminal for this tap. Retrying inside the error
+          // callback races the plugin's own shutdown and causes a flashing loop.
+          if (_partial.trim().isNotEmpty) {
+            _schedulePartialCommit();
+            return;
+          }
+          microphoneUnavailable.value =
+              s != 'error_no_match' && s != 'error_speech_timeout';
+          _inactivityTimer?.cancel();
+          _setState(VoiceTurnState.idle);
+          return;
+        }
+        microphoneUnavailable.value = true;
         _recoverRecognitionIfNeeded(force: true);
       }
       return;
     }
     if (s == 'ended' || s == 'notListening' || s == 'done') {
-      // 연속 인식(웹)은 JS가 자동 재시작한다. 비연속(네이티브)만 여기서 재개.
+      microphoneActive.value = false;
+      // Android sends notListening and done before it may deliver the final
+      // transcript. Preserve that result; never restart from these callbacks.
       if (!_recognizer.isContinuous &&
           state.value == VoiceTurnState.listening) {
-        _recognizer.resume();
+        microphoneFinishing.value = true;
+        _recognitionEndTimer?.cancel();
+        _recognitionEndTimer = Timer(const Duration(milliseconds: 2500), () {
+          if (_disposed || _ending || state.value != VoiceTurnState.listening) {
+            return;
+          }
+          if (_partial.trim().isNotEmpty) {
+            _commitUserTurn(_partial.trim());
+          } else {
+            _inactivityTimer?.cancel();
+            _setState(VoiceTurnState.idle);
+          }
+        });
       }
     }
   }
@@ -258,6 +331,7 @@ class LiveVoiceController {
     if (!force && !_recognizer.needsRecovery) return;
     final ok = _recognizer.resume();
     if (!ok) unawaited(_startRecognition());
+    _updateMicrophoneStatus();
   }
 
   void _resetInactivityTimer() {
@@ -394,6 +468,8 @@ class LiveVoiceController {
     _inactivityTimer = null;
     _partialCommitTimer?.cancel();
     _partialCommitTimer = null;
+    _recognitionEndTimer?.cancel();
+    _recognitionEndTimer = null;
     try {
       await _recognizer.stop();
     } catch (_) {}
@@ -401,6 +477,8 @@ class LiveVoiceController {
       await _audioLevel.stopMic();
     } catch (_) {}
     state.value = VoiceTurnState.idle;
+    microphoneActive.value = false;
+    microphoneFinishing.value = false;
     shaderMode.value = VoiceTurnState.idle.shaderMode;
     level.value = 0.0;
   }
@@ -412,9 +490,13 @@ class LiveVoiceController {
     _speechRecoveryTimer?.cancel();
     _inactivityTimer?.cancel();
     _partialCommitTimer?.cancel();
+    _recognitionEndTimer?.cancel();
     state.dispose();
     level.dispose();
     shaderMode.dispose();
     muted.dispose();
+    microphoneActive.dispose();
+    microphoneFinishing.dispose();
+    microphoneUnavailable.dispose();
   }
 }

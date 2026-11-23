@@ -9,7 +9,7 @@
   "ride_request_status": [
     "WAITING",
     "NOTIFIED",
-    "ACCEPTED",
+    "ACCEPTED", "DENIED",
     "ARRIVED",
     "COMPLETED",
     "CANCELLED"

@@ -184,7 +184,8 @@ class _PassengerLandingState extends State<PassengerLanding> {
 
   void _tap(_LandingDestination destination, String description) {
     if (_opening) return;
-    if (!_usesTapConfirmation || _pending == destination) {
+    if (destination == _LandingDestination.vision ||
+        !_usesTapConfirmation || _pending == destination) {
       unawaited(_open(destination));
       return;
     }
@@ -239,9 +240,9 @@ class _PassengerLandingState extends State<PassengerLanding> {
   }
 
   static const _routeLabel = '노선 정보 검색';
-  static const _routeDescription = '채팅이나 음성으로 버스 노선과 도착 정보를 물어보세요.';
+  static const _routeDescription = '음성으로 버스 노선과 도착 정보를 물어보세요.';
   static const _visionLabel = '장애물 탐지';
-  static const _visionDescription = '카메라로 객체를 감지하고 화면 기준 위치를 소리로 확인합니다.';
+  static const _visionDescription = '기사 승인 후 한 번 누르면 카메라와 장애물 탐지가 시작됩니다.';
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
@@ -269,7 +270,7 @@ class _PassengerLandingState extends State<PassengerLanding> {
               style: Theme.of(context).textTheme.headlineMedium),
           const SizedBox(height: 24),
           if (_usesTapConfirmation) ...[
-            const Text('한 번 누르면 설명을 듣고, 같은 버튼을 빠르게 두 번 누르면 열립니다.'),
+            const Text('장애물 탐지는 한 번 누르면 시작합니다. 다른 메뉴는 한 번 누르면 설명을 듣고, 빠르게 두 번 누르면 열립니다.'),
             const SizedBox(height: 16),
           ],
           _screenReaderButton(

@@ -26,6 +26,7 @@ class VisionScreenAudio extends ChangeNotifier {
     this.requireDoorInBus = false,
     this.prioritizeByDistance = false,
     this.sceneMode = false,
+    this.externalDirection = false,
     this.pingOnly = false,
     this.ccwPositiveYaw = false,
     int? initialBeaconRssi,
@@ -87,6 +88,8 @@ class VisionScreenAudio extends ChangeNotifier {
   final bool requireDoorInBus;
   final bool prioritizeByDistance;
   final bool sceneMode, pingOnly, ccwPositiveYaw;
+  final bool externalDirection;
+  String? spokenObjectClass;
   late final VisionSceneSummaryTracker _sceneTracker;
   Timer? _sceneTimer;
   DateTime? lastSceneReceivedAt;
@@ -398,6 +401,10 @@ class VisionScreenAudio extends ChangeNotifier {
       return;
     }
     enabled = true;
+    if (externalDirection) {
+      spokenObjectClass = null;
+      _lastStarted = null;
+    }
     _lastMeaning = null;
     _streakMeaning = null;
     _streakCount = 0;
@@ -517,6 +524,7 @@ class VisionScreenAudio extends ChangeNotifier {
 
   Future<void> stop({bool notify = true}) {
     _announcedBus = null;
+    spokenObjectClass = null;
     _sceneTimer?.cancel();
     _sceneTracker.invalidate(reason: 'stopped');
     _sceneMeaning = null;
@@ -645,7 +653,12 @@ class VisionScreenAudio extends ChangeNotifier {
     }
     final box = selected['bbox'] as Map;
     final cx = (box['x'] as num).toDouble() + (box['w'] as num).toDouble() / 2;
-    final side = direction(cx), meaning = '${selected['classId']}:${side.name}';
+    final side = direction(cx);
+    // The native guide continuously positions this object's beep, including
+    // zero degrees. Turning the camera is not a new object announcement.
+    final meaning = externalDirection
+        ? selected['classId'] as String
+        : '${selected['classId']}:${side.name}';
     if (_streakMeaning == meaning) {
       _streakCount++;
     } else {
@@ -657,13 +670,40 @@ class VisionScreenAudio extends ChangeNotifier {
     }
     final replacesNonObstacle =
         _isObstacle(selected['classId']) && !_isObstacle(diagnostic['classId']);
-    if (_lastMeaning == meaning ||
+    final alreadySpoken = externalDirection
+        ? spokenObjectClass == selected['classId']
+        : _lastMeaning == meaning;
+    // Retain the announced kind across empty frames. Direction itself still
+    // expires in PassengerDoorSignal; this does not extend a stale beep.
+    if (alreadySpoken ||
         (!replacesNonObstacle &&
             _lastStarted != null &&
             _now() - _lastStarted! < minimumInterval.inMicroseconds)) {
       return;
     }
-    final text = objectLocationSentence(side, selected['classId'] as String);
+    final text = externalDirection
+        ? '${switch (selected['classId']) {
+            'bus' => '버스가', 'bus_door' => '버스 문이', 'pole' => '기둥이',
+            'tree_trunk' => '나무가', 'parked_pm' => '전동 킥보드가', _ => '객체가'}} 인식되었습니다.'
+        : objectLocationSentence(side, selected['classId'] as String);
+    if (externalDirection) {
+      final revision = _revision;
+      bool current() => !_disposed && enabled && isCurrent() && revision == _revision && !priority.priorityActive;
+      _lastMeaning = meaning;
+      _lastStarted = _now();
+      spokenObjectClass = null;
+      diagnostic = {'classId': selected['classId']};
+      busy = true;
+      _notify();
+      unawaited(() async {
+        try {
+          final ok = await priority.speakObservation(_owner, text, current);
+          if (ok && current()) { spokenObjectClass = selected['classId'] as String; completed++; }
+        } catch (_) { if (revision == _revision) _lastMeaning = null; }
+        finally { busy = false; _notify(); }
+      }());
+      return;
+    }
     final freshnessDeadline =
         _now() + const Duration(seconds: 2).inMicroseconds - age.inMicroseconds;
     var confirmedFrame = result['frameId'] as String;

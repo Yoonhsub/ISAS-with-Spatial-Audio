@@ -168,7 +168,7 @@ class _MobiAppState extends State<MobiApp> {
         configurationReady: _firebaseReady,
         configuration: widget.authOnly,
         requiredRole: 'passenger',
-        appLabel: 'MOBI 승객 앱',
+        appLabel: 'MOBI_Finals_승객',
         session: widget.authSession,
       );
     }
@@ -212,13 +212,13 @@ class _MobiAppState extends State<MobiApp> {
         configurationReady: _firebaseReady,
         requiredRole: 'passenger',
         session: widget.authSession,
-        appLabel: 'MOBI',
+        appLabel: 'MOBI_Finals_승객',
         builder: (context, account) => builder(context),
       );
     }
 
     return MaterialApp(
-      title: 'MOBI Passenger App',
+      title: 'MOBI_Finals_승객',
       navigatorObservers: [_navigation],
       builder: (context, child) => AppNavigationBar(
           observer: _navigation,
@@ -240,7 +240,7 @@ class _MobiAppState extends State<MobiApp> {
                           configurationReady: _firebaseReady,
                           requiredRole: 'passenger',
                           session: widget.authSession,
-                          appLabel: 'MOBI 승객 앱',
+                          appLabel: 'MOBI_Finals_승객',
                           builder: (context, account) => KeyedSubtree(
                               key: ValueKey(account.uid), child: home),
                         ),
@@ -257,7 +257,7 @@ class _MobiAppState extends State<MobiApp> {
               configurationReady: _firebaseReady,
               requiredRole: 'passenger',
               session: widget.authSession,
-              appLabel: 'MOBI TAGO 테스트',
+              appLabel: 'MOBI_Finals_승객 TAGO 테스트',
               builder: (context, account) => TagoDiagnosticsPage(
                 client: TagoDiagnosticsClient(baseUrl: resolveApiBaseUrl()),
                 ownsClient: true,
@@ -272,7 +272,7 @@ class _MobiAppState extends State<MobiApp> {
               configurationReady: _firebaseReady,
               requiredRole: 'passenger',
               session: widget.authSession,
-              appLabel: 'MOBI 장애물 탐지',
+              appLabel: 'MOBI_Finals_승객 장애물 탐지',
               builder: (context, account) => V3GuidancePage(
                 key: ValueKey(account.uid),
                 sharedSession: _guidanceSession,
@@ -280,6 +280,7 @@ class _MobiAppState extends State<MobiApp> {
                 onReturnToModeSelection: _resetToModeSelection,
                 dataMode: 'live',
                 visionOnly: true,
+                autoStartCamera: true,
               ),
             ),
         '/standalone-vision': (_) =>
@@ -288,21 +289,21 @@ class _MobiAppState extends State<MobiApp> {
               configurationReady: _firebaseReady,
               requiredRole: 'passenger',
               session: widget.authSession,
-              appLabel: 'MOBI 승객 앱',
+              appLabel: 'MOBI_Finals_승객',
               builder: (context, account) => const NativeAudioPage(),
             ),
         '/local-vision': (_) => AuthGate(
               configurationReady: _firebaseReady,
               requiredRole: 'passenger',
               session: widget.authSession,
-              appLabel: 'MOBI 승객 앱',
+              appLabel: 'MOBI_Finals_승객',
               builder: (context, account) => const LocalVisionPage(),
             ),
         '/v3-guidance': (_) => AuthGate(
               configurationReady: _firebaseReady,
               requiredRole: 'passenger',
               session: widget.authSession,
-              appLabel: 'MOBI 승객 앱',
+              appLabel: 'MOBI_Finals_승객',
               builder: (context, account) => V3GuidancePage(
                 key: ValueKey(account.uid),
                 sharedSession: _guidanceSession,

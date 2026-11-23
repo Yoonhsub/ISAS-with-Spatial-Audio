@@ -20,6 +20,7 @@ class PassengerBusGuide extends ChangeNotifier {
       required this.current,
       this.selectedRide,
       this.photoDemo = false,
+      this.visualOnly = false,
       this.permission = _permission,
       this.scanner = _scanner,
       this.command = _command,
@@ -33,6 +34,8 @@ class PassengerBusGuide extends ChangeNotifier {
   final Duration interval;
   final RideRequestDraft? Function()? selectedRide;
   final bool photoDemo;
+  final bool visualOnly;
+  String? spokenClass;
   RideRequestDraft? _selection;
   bool get usingSelection => _selection != null;
   bool get _sameSelection => identical(_selection, selectedRide?.call());
@@ -109,13 +112,13 @@ class PassengerBusGuide extends ChangeNotifier {
       _display(number, '');
       Set<String> ids;
       try {
-        ids = await macs(number);
+        ids = visualOnly ? {} : await macs(number);
       } catch (_) {
-        if (!photoDemo) rethrow;
+        if (!photoDemo && !visualOnly) rethrow;
         ids = {};
       }
       if (!_valid(epoch) || !_sameSelection) return;
-      if (!photoDemo && ids.isEmpty) {
+      if (!photoDemo && !visualOnly && ids.isEmpty) {
         _display(number, '등록된 시연 비콘 없음');
         return;
       }
@@ -124,18 +127,18 @@ class PassengerBusGuide extends ChangeNotifier {
         try {
           scan = await (_permissionAttempt ??= permission());
         } catch (_) {
-          if (!photoDemo) rethrow;
+          if (!photoDemo && !visualOnly) rethrow;
         }
       }
       if (!_valid(epoch) || !_sameSelection) return;
-      if (!photoDemo && !scan) {
+      if (!photoDemo && !visualOnly && !scan) {
         _display(number, '주변 기기 권한과 위치 설정 확인');
         return;
       }
       final owner =
           '${identityHashCode(this)}:$epoch:${DateTime.now().microsecondsSinceEpoch}';
       _owner = owner;
-      await command('begin', {'owner': owner, 'photoDemo': photoDemo});
+      await command('begin', {'owner': owner, 'photoDemo': photoDemo, 'visualOnly': visualOnly});
       if (!_valid(epoch) || _owner != owner) {
         await command('stop', {'owner': owner});
         return;
@@ -174,7 +177,7 @@ class PassengerBusGuide extends ChangeNotifier {
 
   void _scanEnded(String owner) {
     if (_owner != owner) return;
-    if (!photoDemo) { _lost(owner); return; }
+    if (!photoDemo && !visualOnly) { _lost(owner); return; }
     _seen = null;
     _display(busNo, '사진 시연 · 비콘 탐색 종료');
   }
@@ -230,7 +233,7 @@ class PassengerBusGuide extends ChangeNotifier {
 
   void clearDoor() => _send('clearDoor', {});
   void frame(Map<String, Object?> result, DateTime at, double fov) {
-    if (_owner == null || _muted) return;
+    if (_owner == null || (_muted && !visualOnly)) return;
     final raw = result['detections'];
     if (raw is! List || !fov.isFinite || fov <= 0 || fov >= 180) {
       clearDoor();
@@ -239,9 +242,10 @@ class PassengerBusGuide extends ChangeNotifier {
     final rows = raw.whereType<Map>();
     final doors = rows.where((d) => d['classId'] == 'bus_door');
     final buses = rows.where((d) => d['classId'] == 'bus');
-    final target = doors.isEmpty ? buses : doors;
+    final target = visualOnly ? rows.where((d) => d['classId'] == spokenClass &&
+        d['confidence'] is num && (d['confidence'] as num) >= 0.5) : doors.isEmpty ? buses : doors;
     double? angle;
-    if (target.length == 1 && buses.length <= 1) {
+    if (target.length == 1 && (visualOnly || buses.length <= 1)) {
       final b = target.single['bbox'];
       if (b is Map && b['x'] is num && b['w'] is num) {
         final x = (b['x'] as num).toDouble(), w = (b['w'] as num).toDouble();
@@ -249,7 +253,7 @@ class PassengerBusGuide extends ChangeNotifier {
           angle = (x + w / 2 - .5) * fov;
       }
     }
-    if (target.length > 1 || buses.length > 1) {
+    if (target.length > 1 || (!visualOnly && buses.length > 1)) {
       clearDoor();
       return;
     }

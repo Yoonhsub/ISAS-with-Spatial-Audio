@@ -12,6 +12,7 @@ class RideRequestStatus(str, Enum):
     WAITING = "WAITING"
     NOTIFIED = "NOTIFIED"
     ACCEPTED = "ACCEPTED"
+    DENIED = "DENIED"
     ARRIVED = "ARRIVED"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
@@ -33,6 +34,11 @@ class RideRequestCreate(StrictApiModel):
 
 class RideRequestStatusUpdate(StrictApiModel):
     status: RideRequestStatus
+
+
+class RideTransferRequest(StrictApiModel):
+    sessionId: str = Field(min_length=1, max_length=128, pattern=NON_BLANK_PATTERN)
+    busNo: str = Field(min_length=1, max_length=16, pattern=NON_BLANK_PATTERN)
 
 
 class RideRequestRecord(StrictApiModel):

@@ -75,11 +75,11 @@ def test_transition_matrix(storage, old, new):
     rid = seed(old)
     service = RideRequestService(client)
     allowed = {
-        Status.WAITING: {Status.ACCEPTED, Status.CANCELLED},
-        Status.NOTIFIED: {Status.ACCEPTED, Status.CANCELLED},
+        Status.WAITING: {Status.ACCEPTED, Status.DENIED, Status.CANCELLED},
+        Status.NOTIFIED: {Status.ACCEPTED, Status.DENIED, Status.CANCELLED},
         Status.ACCEPTED: {Status.ARRIVED, Status.COMPLETED, Status.CANCELLED},
         Status.ARRIVED: {Status.COMPLETED, Status.CANCELLED},
-        Status.COMPLETED: set(), Status.CANCELLED: set(),
+        Status.COMPLETED: set(), Status.CANCELLED: set(), Status.DENIED: set(),
     }
     if new == old or new in allowed[old]:
         assert update(service, rid, new).status == new

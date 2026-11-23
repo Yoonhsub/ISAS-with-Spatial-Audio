@@ -24,6 +24,36 @@ const record = {
   'stopId': 'stop',
 };
 void main() {
+  testWidgets('approved visual guide locates the spoken object without BLE and stops on cancellation', (t) async {
+    AcceptedRide? accepted = AcceptedRide.read(record, 'req711');
+    final events = <(String, Map<String, Object?>)>[];
+    final guide = PassengerBusGuide(visualOnly: true,
+      lookup: () async => accepted, current: () => true,
+      macs: (_) async => throw StateError('Visual guide must not require BLE'),
+      permission: () async => throw StateError('No BLE permission required'),
+      command: (name, args) async => events.add((name,args)));
+    guide.start();
+    await t.pump();
+    expect(events.first.$2['visualOnly'], true);
+    guide.spokenClass = 'pole';
+    guide.frame({'detections': [
+      {'classId':'bus', 'confidence':.9, 'bbox':{'x':.1,'w':.2}},
+      {'classId':'pole', 'confidence':.9, 'bbox':{'x':.7,'w':.2}},
+    ]}, DateTime.now(), 60);
+    expect(events.last.$2['angle'], closeTo(18, .001));
+    accepted = null;
+    await t.pump(const Duration(seconds: 5));
+    expect(events.last.$1, 'stop');
+    expect(guide.busNo, isNull);
+    await guide.stop();
+    accepted = AcceptedRide.read(record, 'req711');
+    guide.start();
+    await t.pump();
+    expect(events.last.$1, 'begin');
+    expect(guide.busNo, '711');
+    guide.dispose();
+  });
+
   test(
       'only a complete accepted response for the same request supplies a number',
       () {

@@ -40,6 +40,7 @@ void main() {
     try {
       await tester.pumpWidget(MaterialApp(
         home: PassengerLanding(speech: speech, onOnline: () => opened++),
+        routes: {'/online-vision': (_) => const Scaffold(body: Text('camera entry'))},
       ));
       final route = find.text('노선 정보 검색');
       await tester.tap(route);
@@ -51,7 +52,10 @@ void main() {
       await tester.pump();
       expect(opened, 0);
       await tester.tap(find.text('장애물 탐지'));
-      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.text('camera entry'), findsOneWidget);
+      Navigator.of(tester.element(find.text('camera entry'))).pop();
+      await tester.pumpAndSettle();
       await tester.tap(route);
       await tester.pump();
       expect(opened, 0);
@@ -161,7 +165,7 @@ void main() {
           of: find.byType(AppBar), matching: find.text('로그아웃')));
       await tester.pumpAndSettle();
       expect(session.signedOut, isTrue);
-      expect(find.text('MOBI 로그인'), findsOneWidget);
+      expect(find.text('MOBI_Finals_승객 로그인'), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

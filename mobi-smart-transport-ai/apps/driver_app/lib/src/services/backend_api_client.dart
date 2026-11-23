@@ -70,6 +70,7 @@ class BackendApiClient {
 
       return const DriverRideRequestsResult(
         statusLabel: 'mock 요청 1건',
+        isSuccess: true,
         description: 'mock 기사 기준 탑승 요청 1건을 표시합니다.',
         requests: [
           DriverRideRequestItem(
@@ -120,6 +121,7 @@ class BackendApiClient {
       if (requests.isEmpty) {
         return const DriverRideRequestsResult(
           statusLabel: '요청 없음',
+          isSuccess: true,
           description: '현재 배정된 탑승 요청이 없습니다.',
           requests: [],
         );
@@ -170,6 +172,7 @@ class BackendApiClient {
 
       return DriverRideRequestsResult(
         statusLabel: '${requestItems.length}건 수신',
+        isSuccess: true,
         description: '기사에게 배정된 탑승 요청 ${requestItems.length}건을 표시합니다.',
         requests: requestItems,
       );
@@ -295,6 +298,7 @@ class BackendHealthStatus {
 
 class DriverRideRequestsResult {
   const DriverRideRequestsResult({
+    this.isSuccess = false,
     required this.statusLabel,
     required this.description,
     required this.requests,
@@ -303,6 +307,7 @@ class DriverRideRequestsResult {
   final String statusLabel;
   final String description;
   final List<DriverRideRequestItem> requests;
+  final bool isSuccess;
 }
 
 class DriverRideRequestItem {

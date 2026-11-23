@@ -34,6 +34,25 @@ LocalObservation detection(int ticks,
     LocalObservation(camera.frame(ticks), Uint8List(0),
         boxes ?? [LocalBox('bus', confidence, x, .2, .2, .3)], 2, 2, 1, 2);
 void main() {
+  testWidgets('approved visual mode speaks object recognition before directional output', (t) async {
+    final tts = speech.FakeTts();
+    final engine = SpatialVerificationEngine(NativeDirectionalCueOutput(port: native.Port()), tts);
+    final priority = SpeechPriorityCoordinator(engine);
+    final a = VisionScreenAudio(priority: priority, engine: engine,
+      sessionGeneration: 'approved', isCurrent: () => true, externalDirection: true);
+    a.setEnabled(true);
+    a.observe(detection(1, boxes: [const LocalBox('pole', .9, .1, .2, .2, .3)]).toDetectionResult(), age: Duration.zero);
+    for (var i=0; i<20; i++) { await t.pump(); }
+    expect(tts.spoken, ['기둥이 인식되었습니다.']);
+    expect(a.spokenObjectClass, isNull);
+    tts.finish();
+    for (var i=0; i<20; i++) { await t.pump(); }
+    expect(a.spokenObjectClass, 'pole');
+    a.dispose();
+    priority.dispose();
+    await engine.dispose();
+  });
+
   testWidgets('live camera remains mounted while detection count changes',
       (tester) async {
     var created = 0, disposed = 0;

@@ -75,11 +75,11 @@ class BusRouteService(DataGoKrClient):
                     exact_route_ids.append(route_id)
         return exact_route_ids
 
-    def routes_serving_stop(self, city_code: str, stop_id: str) -> dict[str, str]:
+    def routes_serving_stop(self, city_code: str, stop_id: str, *, timeout: float = 2.0) -> dict[str, str]:
         """Verified route ID and display number pairs for one provider stop ID."""
         response = self.get("/getSttnThrghRouteList",
             base_url="https://apis.data.go.kr/1613000/BusSttnInfoInqireService",
-            timeout=2.0,
+            timeout=timeout,
             params={"cityCode": city_code, "nodeid": stop_id, "pageNo": "1", "numOfRows": "100", "_type": "json"})
         routes: dict[str, str] = {}
         for item in self._verified_items(response.json()):
@@ -105,10 +105,11 @@ class BusRouteService(DataGoKrClient):
             raise ValueError("Incomplete TAGO route list")
         return rows
 
-    def get_route_stops(self, cityCode: str, routeId: str, *, verify_page: bool = False) -> NormalizedBusRouteStopsResponse:
+    def get_route_stops(self, cityCode: str, routeId: str, *, verify_page: bool = False, timeout: float | None = None) -> NormalizedBusRouteStopsResponse:
         """지정된 노선이 경유하는 정류소 목록을 반환합니다."""
         response = self.get(
             path="/getRouteAcctoThrghSttnList",
+            timeout=timeout,
             params={
                 "cityCode": cityCode,
                 "routeId": routeId,

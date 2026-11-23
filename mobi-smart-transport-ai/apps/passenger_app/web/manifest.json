@@ -1,6 +1,6 @@
 {
-    "name": "모비 실시간 버스 안내",
-    "short_name": "모비",
+    "name": "MOBI_Finals_승객",
+    "short_name": "MOBI_Finals_승객",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0B0B12",

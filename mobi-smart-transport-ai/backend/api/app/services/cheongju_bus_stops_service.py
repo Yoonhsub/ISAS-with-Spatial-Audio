@@ -18,6 +18,17 @@ import httpx
 _DEFAULT_BASE_URL = "https://api.odcloud.kr/api"
 _DEFAULT_PATH = "/15041896/v1/uddi:083f11f7-5067-429b-a75d-e32f94269aaf"
 _CACHE_ONLY = ContextVar("tago_stop_cache_only", default=False)
+_STOP_LOOKUP_TIMEOUT = ContextVar("tago_stop_lookup_timeout", default=2.0)
+
+
+@contextmanager
+def interactive_stop_lookup():
+    """Allow a bounded manual-search wait without changing camera-path deadlines."""
+    token = _STOP_LOOKUP_TIMEOUT.set(6.0)
+    try:
+        yield
+    finally:
+        _STOP_LOOKUP_TIMEOUT.reset(token)
 
 
 class StopLookupError(ValueError):
@@ -402,7 +413,7 @@ class TagoBusStopsService(CheongjuBusStopsService):
                     timeout=2.0, follow_redirects=False,
                     limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
                 )
-            response = self._client.get(url, params=params, timeout=2.0, follow_redirects=False)
+            response = self._client.get(url, params=params, timeout=_STOP_LOOKUP_TIMEOUT.get(), follow_redirects=False)
             response.raise_for_status()
             payload = response.json()["response"]
             if str(payload["header"]["resultCode"]) not in {"0", "00"}:

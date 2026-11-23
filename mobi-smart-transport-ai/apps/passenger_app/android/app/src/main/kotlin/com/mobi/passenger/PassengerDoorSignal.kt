@@ -5,7 +5,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** All timestamps share Android's monotonic elapsed-realtime clock. */
-internal class PassengerDoorSignal(private val photoDemo: Boolean = false) {
+internal class PassengerDoorSignal(private val photoDemo: Boolean = false, private val visualOnly: Boolean = false) {
     data class Cue(val interval: Int, val angle: Double?, val beaconAge: Int, val headingAge: Int)
     private data class Heading(val at: Long, val degrees: Double)
     private val headings = ArrayDeque<Heading>()
@@ -93,7 +93,7 @@ internal class PassengerDoorSignal(private val photoDemo: Boolean = false) {
             return
         }
         val freshBeacon = beaconAt?.let { now - it in 0..2999 } == true
-        if (!degrees.isFinite() || abs(degrees) >= 90 || (!photoDemo && !freshBeacon)) return
+        if (!degrees.isFinite() || abs(degrees) >= 90 || (!photoDemo && !visualOnly && !freshBeacon)) return
         beginVisualGuidance()
         imageAngle = degrees
         frameAt = at
@@ -109,7 +109,7 @@ internal class PassengerDoorSignal(private val photoDemo: Boolean = false) {
 
     fun cue(now: Long): Cue? {
         val age = beaconAt?.let { now - it }?.takeIf { it in 0..2999 }
-        if (!photoDemo && age == null) return null
+        if (!photoDemo && !visualOnly && age == null) return null
         val frameAge = frameAt?.let { now - it }
         val sample = headings.lastOrNull()
         val sensorAge = sample?.let { now - it.at }

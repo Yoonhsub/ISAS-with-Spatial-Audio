@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from concurrent.futures import ThreadPoolExecutor, wait
 from threading import Lock
 from typing import Iterable, Sequence
 
@@ -8,6 +9,33 @@ from app.schemas.v3 import FallbackSource
 from services.public_data.public_data_client import BusRouteService
 
 _MAX_DYNAMIC_ROUTES = 3
+_MAX_TRANSFER_ROUTES_PER_SIDE = 12
+_TRANSFER_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tago-transfer")
+
+
+@dataclass(frozen=True)
+class TransferDiscovery:
+    sequences: list[RouteSequence]
+    partial: bool = False
+    limited: bool = False
+
+
+def _bounded_lookup(items, lookup, *, seconds):
+    futures = [(key, _TRANSFER_EXECUTOR.submit(lookup, key)) for key in items]
+    done, pending = wait([future for _, future in futures], timeout=seconds)
+    for future in pending:
+        future.cancel()
+    results = {}
+    partial = bool(pending)
+    for key, future in futures:
+        if future not in done:
+            continue
+        try:
+            results[key] = future.result()
+        except Exception:
+            # A failed provider call must never become a synthetic route.
+            partial = True
+    return results, partial
 
 
 @dataclass(frozen=True)
@@ -136,6 +164,42 @@ class RouteStopSequenceCache:
                               for node in sorted(result.nodes, key=lambda node: node.nodeOrd))
                 sequences.append(RouteSequence(route_id, number, nodes, FallbackSource.PUBLIC_API))
         return sequences
+
+    def discover_transfer(self, origin_ids: list[str], destination_ids: list[str], *, route_no: str | None = None) -> TransferDiscovery:
+        """Discover endpoint routes, then verify their full stop order.
+
+        The live transfer join uses exact stop IDs. Nearby/opposite platforms
+        need a verified pedestrian connection and are not inferred here.
+        Provider I/O is bounded independently of the number of city routes.
+        """
+        stop_routes, partial = _bounded_lookup(
+            dict.fromkeys(origin_ids + destination_ids),
+            lambda stop: self._route_service.routes_serving_stop(self._city_code, stop, timeout=2.0),
+            seconds=8,
+        )
+        origins = {rid: number for stop in origin_ids for rid, number in stop_routes.get(stop, {}).items()
+                   if route_no is None or number == route_no}
+        destinations = {rid: number for stop in destination_ids for rid, number in stop_routes.get(stop, {}).items()}
+        conflicting = {rid for rid in origins.keys() & destinations.keys() if origins[rid] != destinations[rid]}
+        partial = partial or bool(conflicting)
+        for rid in conflicting:
+            origins.pop(rid)
+            destinations.pop(rid)
+        limited = max(len(origins), len(destinations)) > _MAX_TRANSFER_ROUTES_PER_SIDE
+        routes = dict(list(origins.items())[:_MAX_TRANSFER_ROUTES_PER_SIDE])
+        routes.update(list(destinations.items())[:_MAX_TRANSFER_ROUTES_PER_SIDE])
+        if not origins or not destinations:
+            return TransferDiscovery([], partial, limited)
+        responses, failed = _bounded_lookup(
+            routes,
+            lambda rid: self._route_service.get_route_stops(self._city_code, rid, verify_page=True, timeout=3.0),
+            seconds=20,
+        )
+        sequences = [RouteSequence(rid, routes[rid], tuple(
+            RouteStopNode(node.nodeId, node.nodeNm, node.nodeOrd)
+            for node in sorted(response.nodes, key=lambda node: node.nodeOrd)
+        ), FallbackSource.PUBLIC_API) for rid, response in responses.items() if response.nodes]
+        return TransferDiscovery(sequences, partial or failed, limited)
 
     def live_load_status(self, route_nos: Iterable[str]) -> str:
         requested = {route_no.strip() for route_no in route_nos if route_no.strip()}

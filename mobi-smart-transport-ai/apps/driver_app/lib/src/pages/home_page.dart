@@ -24,6 +24,25 @@ class _HomePageState extends State<HomePage> {
   StreamSubscription<AuthAccount?>? _subscription;
   String? _uid;
   int _epoch = 0;
+  Timer? _poll;
+  bool _history = false;
+  static const _terminal = {'DENIED', 'REJECTED', 'CANCELLED', 'COMPLETED'};
+
+  bool get _hasActiveRequests =>
+      _rideRequestsResult?.requests
+          .any((request) => !_terminal.contains(request.statusLabel)) ??
+      false;
+
+  void _syncPolling() {
+    if (!mounted || _uid == null || _hasActiveRequests) {
+      _poll?.cancel();
+      _poll = null;
+      return;
+    }
+    _poll ??= Timer.periodic(const Duration(minutes: 1), (_) {
+      if (!_hasActiveRequests) _refreshDriverRideRequests();
+    });
+  }
 
   bool _current(int epoch, String? uid) =>
       mounted &&
@@ -34,6 +53,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _epoch++;
+    _poll?.cancel();
     _subscription?.cancel();
     super.dispose();
   }
@@ -45,6 +65,8 @@ class _HomePageState extends State<HomePage> {
       _statusUpdateResult = null;
       _isLoadingRideRequests = true;
     });
+    _poll?.cancel();
+    _poll = null;
     try {
       await _auth.signOut();
     } catch (_) {
@@ -82,8 +104,10 @@ class _HomePageState extends State<HomePage> {
         _isUpdatingRideRequestStatus = false;
         _isLoadingRideRequests = true;
       });
+      _syncPolling();
       _loadDriverRideRequests();
     });
+    _syncPolling();
     _loadBackendHealthStatus();
     _loadDriverRideRequests();
   }
@@ -132,6 +156,7 @@ class _HomePageState extends State<HomePage> {
         _rideRequestsResult = result;
         _isLoadingRideRequests = false;
       });
+      if (result.isSuccess) _syncPolling();
     } catch (_) {
       if (!_current(epoch, uid)) return;
       setState(() {
@@ -159,7 +184,7 @@ class _HomePageState extends State<HomePage> {
     await _loadDriverRideRequests();
   }
 
-  Future<void> _acceptRideRequest(String? requestId) async {
+  Future<void> _updateRideRequest(String? requestId, String status) async {
     if (_isUpdatingRideRequestStatus ||
         _isLoadingRideRequests ||
         _uid == null) {
@@ -180,13 +205,13 @@ class _HomePageState extends State<HomePage> {
 
     final result = await _backendApiClient.updateRideRequestStatus(
       requestId: requestId,
-      status: 'ACCEPTED',
+      status: status,
     );
 
     if (!_current(epoch, uid)) return;
 
     setState(() {
-      _statusUpdateResult = result;
+      _statusUpdateResult = result.isSuccess ? null : result;
       _isUpdatingRideRequestStatus = false;
     });
 
@@ -201,12 +226,16 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final rideRequests = _rideRequestsResult?.requests ?? const [];
+    final rideRequests =
+        (_rideRequestsResult?.requests ?? const <DriverRideRequestItem>[])
+            .where((r) => _terminal.contains(r.statusLabel) == _history)
+            .toList();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('MOBI 기사 앱'),
-        centerTitle: true,
+        title: const Text('MOBI. 기사',
+            style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1)),
+        centerTitle: false,
         actions: [
           IconButton(
             tooltip: '로그아웃',
@@ -216,156 +245,201 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: SafeArea(
-        child: RefreshIndicator(
-          onRefresh: _refreshDriverRideRequests,
-          child: ListView(
-            padding: const EdgeInsets.all(20),
-            children: [
-              const _HeaderSection(),
-              const SizedBox(height: 16),
-              _InfoCard(
-                title: '백엔드 연결 상태',
-                statusLabel: _isLoadingBackendHealth
-                    ? '확인 중'
-                    : (_backendHealthStatus?.isAvailable ?? false)
-                        ? '연결 성공'
-                        : '연결 실패',
-                description:
-                    _backendHealthStatus?.message ?? '백엔드 연결 상태를 확인하는 중입니다.',
-                icon: Icons.cloud_done_outlined,
-                semanticHint: '실제 /health API 연결 성공 또는 실패 상태를 표시하는 영역입니다.',
-              ),
-              const SizedBox(height: 16),
-              const _InfoCard(
-                title: '운행 상태',
-                statusLabel: '대기 중',
-                description: '현재 운행 상태는 기사 앱 UI 확인용 기본 상태입니다.',
-                icon: Icons.directions_bus_filled_outlined,
-                semanticHint: '기사 운행 상태를 표시하는 영역입니다.',
-              ),
-              const SizedBox(height: 16),
-              _InfoCard(
-                title: '탑승 요청 목록',
-                statusLabel: _isLoadingRideRequests
-                    ? '불러오는 중'
-                    : _rideRequestsResult?.statusLabel ?? '요청 없음',
-                description: _rideRequestsResult?.description ??
-                    '기사에게 배정된 탑승 요청 목록을 불러오는 중입니다.',
-                icon: Icons.accessible_forward_outlined,
-                semanticHint: '기사에게 배정된 탑승 요청 목록 상태를 표시하는 영역입니다.',
-              ),
-              if (_statusUpdateResult != null) ...[
-                const SizedBox(height: 12),
-                _InfoCard(
-                  title: '상태 변경 결과',
-                  statusLabel: _isUpdatingRideRequestStatus
-                      ? '변경 중'
-                      : _statusUpdateResult?.statusLabel ?? '대기',
-                  description: _statusUpdateResult?.description ??
-                      '탑승 요청 상태 변경 결과를 기다리는 중입니다.',
-                  icon: Icons.check_circle_outline,
-                  semanticHint: _statusUpdateResult?.semanticHint ??
-                      '탑승 요청 상태 변경 결과를 표시하는 영역입니다.',
-                ),
-              ],
-              const SizedBox(height: 12),
-              Semantics(
-                button: true,
-                label: _isLoadingRideRequests
-                    ? '탑승 요청 목록 새로고침 중'
-                    : '탑승 요청 목록 새로고침',
-                hint: '두 번 탭하면 기사에게 배정된 탑승 요청 목록을 다시 불러옵니다.',
-                child: SizedBox(
-                  height: 56,
-                  child: OutlinedButton.icon(
-                    onPressed: _isLoadingRideRequests ||
-                            _isUpdatingRideRequestStatus ||
-                            _uid == null
-                        ? null
-                        : _refreshDriverRideRequests,
-                    icon: Icon(
-                      _isLoadingRideRequests
-                          ? Icons.hourglass_empty
-                          : Icons.refresh_outlined,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1040),
+            child: RefreshIndicator(
+              onRefresh: _refreshDriverRideRequests,
+              child: ListView(
+                padding: const EdgeInsets.all(24),
+                children: [
+                  const _HeaderSection(),
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      title: const Text('이전 요청 기록',
+                          style: TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.w700)),
+                      subtitle: Text(_history
+                          ? '거부·취소·완료된 요청을 표시합니다.'
+                          : '진행 중인 탑승 요청을 표시합니다.'),
+                      value: _history,
+                      onChanged: (value) => setState(() => _history = value)),
+                  const SizedBox(height: 16),
+                  _InfoCard(
+                    title: '서비스 연결',
+                    statusLabel: _isLoadingBackendHealth
+                        ? '확인 중'
+                        : (_backendHealthStatus?.isAvailable ?? false)
+                            ? '연결 성공'
+                            : '연결 실패',
+                    description: _isLoadingBackendHealth
+                        ? '연결을 확인하고 있습니다.'
+                        : (_backendHealthStatus?.isAvailable ?? false)
+                            ? '승객이 보낸 탑승 요청을 받을 준비가 되었습니다.'
+                            : '연결을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+                    icon: Icons.cloud_done_outlined,
+                    semanticHint: '실제 /health API 연결 성공 또는 실패 상태를 표시하는 영역입니다.',
+                  ),
+                  const SizedBox(height: 16),
+                  _InfoCard(
+                    title: '탑승 요청 목록',
+                    statusLabel: _isLoadingRideRequests
+                        ? '불러오는 중'
+                        : _rideRequestsResult?.statusLabel ?? '요청 없음',
+                    description: _rideRequestsResult?.description ??
+                        '기사에게 배정된 탑승 요청 목록을 불러오는 중입니다.',
+                    icon: Icons.accessible_forward_outlined,
+                    semanticHint: '기사에게 배정된 탑승 요청 목록 상태를 표시하는 영역입니다.',
+                  ),
+                  if (_statusUpdateResult != null) ...[
+                    const SizedBox(height: 12),
+                    _InfoCard(
+                      title: '상태 변경 결과',
+                      statusLabel: _isUpdatingRideRequestStatus
+                          ? '변경 중'
+                          : _statusUpdateResult?.statusLabel ?? '대기',
+                      description: _statusUpdateResult?.description ??
+                          '탑승 요청 상태 변경 결과를 기다리는 중입니다.',
+                      icon: Icons.check_circle_outline,
+                      semanticHint: _statusUpdateResult?.semanticHint ??
+                          '탑승 요청 상태 변경 결과를 표시하는 영역입니다.',
                     ),
-                    label: Text(
-                      _isLoadingRideRequests ? '불러오는 중...' : '요청 목록 새로고침',
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+                  ],
+                  const SizedBox(height: 12),
+                  Semantics(
+                    button: true,
+                    label: _isLoadingRideRequests
+                        ? '탑승 요청 목록 새로고침 중'
+                        : '탑승 요청 목록 새로고침',
+                    hint: '두 번 탭하면 기사에게 배정된 탑승 요청 목록을 다시 불러옵니다.',
+                    child: SizedBox(
+                      height: 56,
+                      child: OutlinedButton.icon(
+                        onPressed: _isLoadingRideRequests ||
+                                _isUpdatingRideRequestStatus ||
+                                _uid == null
+                            ? null
+                            : _refreshDriverRideRequests,
+                        icon: Icon(
+                          _isLoadingRideRequests
+                              ? Icons.hourglass_empty
+                              : Icons.refresh_outlined,
+                        ),
+                        label: Text(
+                          _isLoadingRideRequests ? '불러오는 중...' : '요청 목록 새로고침',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              if (_isLoadingRideRequests)
-                const _InfoCard(
-                  title: '요청 카드',
-                  statusLabel: '불러오는 중',
-                  description: '기사에게 배정된 탑승 요청을 불러오는 중입니다.',
-                  icon: Icons.hourglass_empty,
-                  semanticHint: '탑승 요청 목록 로딩 상태입니다.',
-                )
-              else if (rideRequests.isEmpty)
-                const _InfoCard(
-                  title: '요청 카드',
-                  statusLabel: '요청 없음',
-                  description: '현재 표시할 탑승 요청이 없습니다.',
-                  icon: Icons.inbox_outlined,
-                  semanticHint: '기사에게 배정된 탑승 요청이 없는 상태입니다.',
-                )
-              else
-                ...rideRequests.map(
-                  (request) => Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _InfoCard(
-                          title: request.requestLabel,
-                          statusLabel: request.statusLabel,
-                          description: request.description,
-                          icon: Icons.assignment_outlined,
-                          semanticHint: request.semanticHint,
-                        ),
-                        const SizedBox(height: 8),
-                        Semantics(
-                          button: true,
-                          label: '${request.requestLabel} 수락',
-                          hint: '두 번 탭하면 해당 탑승 요청을 ACCEPTED 상태로 변경합니다.',
-                          child: SizedBox(
-                            height: 52,
-                            child: ElevatedButton.icon(
-                              onPressed: _isUpdatingRideRequestStatus ||
-                                      !{'WAITING', 'NOTIFIED'}
-                                          .contains(request.statusLabel)
-                                  ? null
-                                  : () => _acceptRideRequest(request.requestId),
-                              icon: Icon(
-                                _isUpdatingRideRequestStatus
-                                    ? Icons.hourglass_empty
-                                    : Icons.check_circle_outline,
-                              ),
-                              label: Text(
-                                _isUpdatingRideRequestStatus
-                                    ? '처리 중...'
-                                    : '요청 수락',
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
+                  const SizedBox(height: 16),
+                  if (_isLoadingRideRequests)
+                    const _InfoCard(
+                      title: '요청 카드',
+                      statusLabel: '불러오는 중',
+                      description: '기사에게 배정된 탑승 요청을 불러오는 중입니다.',
+                      icon: Icons.hourglass_empty,
+                      semanticHint: '탑승 요청 목록 로딩 상태입니다.',
+                    )
+                  else if (rideRequests.isEmpty)
+                    const _InfoCard(
+                      title: '요청 카드',
+                      statusLabel: '요청 없음',
+                      description: '현재 표시할 탑승 요청이 없습니다.',
+                      icon: Icons.inbox_outlined,
+                      semanticHint: '기사에게 배정된 탑승 요청이 없는 상태입니다.',
+                    )
+                  else
+                    ...rideRequests.map(
+                      (request) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _InfoCard(
+                              title: request.requestLabel,
+                              statusLabel: request.statusLabel,
+                              description: request.description,
+                              icon: Icons.assignment_outlined,
+                              semanticHint: request.semanticHint,
+                            ),
+                            const SizedBox(height: 8),
+                            if (!_history)
+                              Semantics(
+                                button: true,
+                                label: '${request.requestLabel} 수락',
+                                hint: '두 번 탭하면 해당 탑승 요청을 ACCEPTED 상태로 변경합니다.',
+                                child: SizedBox(
+                                  height: 56,
+                                  child: ElevatedButton.icon(
+                                    onPressed: _isUpdatingRideRequestStatus ||
+                                            !{'WAITING', 'NOTIFIED'}
+                                                .contains(request.statusLabel)
+                                        ? null
+                                        : () => _updateRideRequest(
+                                            request.requestId, 'ACCEPTED'),
+                                    icon: Icon(
+                                      _isUpdatingRideRequestStatus
+                                          ? Icons.hourglass_empty
+                                          : Icons.check_circle_outline,
+                                    ),
+                                    label: Text(
+                                      _isUpdatingRideRequestStatus
+                                          ? '처리 중...'
+                                          : '요청 수락',
+                                      style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
+                            if (!_history &&
+                                {'WAITING', 'NOTIFIED'}
+                                    .contains(request.statusLabel))
+                              Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: OutlinedButton(
+                                      onPressed: _isUpdatingRideRequestStatus
+                                          ? null
+                                          : () => _updateRideRequest(
+                                              request.requestId, 'DENIED'),
+                                      child: const Text('요청 거부',
+                                          style: TextStyle(
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.w700)))),
+                            if (!_history && request.statusLabel == 'ACCEPTED')
+                              Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: OutlinedButton(
+                                      onPressed: _isUpdatingRideRequestStatus
+                                          ? null
+                                          : () => _updateRideRequest(
+                                              request.requestId, 'CANCELLED'),
+                                      child: const Text('승인한 요청 취소',
+                                          style: TextStyle(
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.w700)))),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
-                  ),
-                ),
-              const SizedBox(height: 16),
-              const _MvpNoticeCard(),
-            ],
+                  const SizedBox(height: 16),
+                  Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Text(
+                          _poll?.isActive ?? false
+                              ? '진행 중인 요청이 없을 때 새 요청을 1분마다 확인합니다.'
+                              : '자동 새로고침이 중지되어 있습니다. 필요하면 요청 목록을 직접 새로고침해 주세요.',
+                          textAlign: TextAlign.center)),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -377,28 +451,35 @@ class _HeaderSection extends StatelessWidget {
   const _HeaderSection();
 
   @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      header: true,
-      label: 'MOBI 기사 앱 홈 화면',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '탑승 요청을 확인하세요',
-            style: Theme.of(
-              context,
-            ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+  Widget build(BuildContext context) => Semantics(
+        header: true,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: const Color(0xFF111111),
+            borderRadius: BorderRadius.circular(20),
           ),
-          const SizedBox(height: 8),
-          Text(
-            '승객의 탑승 지원 요청을 확인하고 운행 흐름을 준비하는 기사 앱 화면입니다.',
-            style: Theme.of(context).textTheme.bodyLarge,
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.directions_bus_filled_outlined,
+                  color: Colors.white, size: 32),
+              SizedBox(height: 16),
+              Text('탑승 요청을 확인하세요',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w800,
+                      height: 1.4)),
+              SizedBox(height: 8),
+              Text('승객이 선택한 버스의 탑승 요청을 승인하거나 거부할 수 있습니다.',
+                  style: TextStyle(
+                      color: Colors.white, fontSize: 17, height: 1.5)),
+            ],
           ),
-        ],
-      ),
-    );
-  }
+        ),
+      );
 }
 
 class _InfoCard extends StatelessWidget {
@@ -423,7 +504,7 @@ class _InfoCard extends StatelessWidget {
       label: '$title, 상태 $statusLabel, $description',
       hint: semanticHint,
       child: Card(
-        elevation: 1,
+        elevation: 0,
         child: Padding(
           padding: const EdgeInsets.all(18),
           child: Row(
@@ -475,7 +556,10 @@ class _InfoHeader extends StatelessWidget {
           label: '상태 $statusLabel',
           child: DecoratedBox(
             decoration: BoxDecoration(
-              border: Border.all(color: Theme.of(context).colorScheme.outline),
+              color: statusLabel == 'ACCEPTED'
+                  ? const Color(0xFF111111)
+                  : Colors.white,
+              border: Border.all(color: const Color(0xFF111111), width: 2),
               borderRadius: BorderRadius.circular(999),
             ),
             child: Padding(
@@ -484,45 +568,16 @@ class _InfoHeader extends StatelessWidget {
                 statusLabel,
                 style: Theme.of(
                   context,
-                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.bold),
+                ).textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: statusLabel == 'ACCEPTED'
+                        ? Colors.white
+                        : const Color(0xFF111111)),
               ),
             ),
           ),
         ),
       ],
-    );
-  }
-}
-
-class _MvpNoticeCard extends StatelessWidget {
-  const _MvpNoticeCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      container: true,
-      label: 'MVP 안내, 현재 화면은 기사 앱 핵심 흐름을 확인하기 위한 초안입니다.',
-      hint: '요청 목록은 서버에서 조회합니다. 운행 상태와 안전 판단은 별도입니다.',
-      child: Card(
-        elevation: 0,
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Icon(Icons.info_outline, size: 30),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Text(
-                  '요청 목록과 수락은 백엔드에 연결되어 있습니다. 새로고침으로 상태를 확인하세요. '
-                  '운행 상태는 시연용이며, 요청 수락은 승차 안전 허가가 아닙니다. FCM 실기기 알림은 별도 검증이 필요합니다.',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

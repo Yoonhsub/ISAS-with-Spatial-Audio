@@ -124,6 +124,7 @@ class CheongjuRoutePlanner:
 
         sequence_live = live if use_live_sequences is None else use_live_sequences
         dynamic = sequence_live and dynamic_route_discovery_enabled()
+        transfer_search = None
         if dynamic:
             if os.getenv("CHEONGJU_BUS_STOPS_PROVIDER", "odcloud").strip().lower() != "tago":
                 return self._empty_response(status=RoutePlanStatus.NOT_FOUND,
@@ -145,6 +146,19 @@ class CheongjuRoutePlanner:
             raw_plans = self._direct_planner.find_plans(
                 destination_name=destination.topCandidate.name if destination.topCandidate else destination.normalizedText,
                 origin_candidates=origin_stops, destination_candidates=destination_stops, sequences=sequences)
+            if not raw_plans:
+                origin_stops = [stop for stop in destination.originStops
+                                if stop.source == FallbackSource.PUBLIC_API and stop.stopId][:_MAX_ORIGIN_STOPS]
+                destination_stops = [stop for stop in destination.destinationStops
+                                     if stop.source == FallbackSource.PUBLIC_API and stop.stopId][:_MAX_DESTINATION_STOPS]
+                transfer_search = self._sequence_cache.discover_transfer(
+                    [stop.stopId for stop in origin_stops], [stop.stopId for stop in destination_stops], route_no=route_no)
+                sequences = transfer_search.sequences
+                raw_plans = self._find_plans(destination=destination.model_copy(update={
+                    'originStops': origin_stops, 'destinationStops': destination_stops,
+                }), sequences=sequences)
+                if route_no is not None:
+                    raw_plans = [raw for raw in raw_plans if raw.segments[0][0].route_no == route_no]
         else:
             sequences = self._route_sequences(live=sequence_live)
             raw_plans = self._find_plans(destination=destination, sequences=sequences)
@@ -188,7 +202,10 @@ class CheongjuRoutePlanner:
                 )
         question = None if recommended else "현재 후보 정류장 조합으로 갈 수 있는 직통 또는 1회 환승 경로를 찾지 못했어요."
         if dynamic and recommended is None:
-            question = "조회한 정류장과 노선 후보에서 확인된 직통 경로를 찾지 못했어요."
+            question = "조회한 정류장과 노선 후보에서 직통 또는 같은 정류장에서 한 번 갈아타는 경로를 확인하지 못했어요."
+            if transfer_search is not None and transfer_search.partial:
+                question = "일부 노선 정보를 불러오지 못해 환승 경로를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요."
+                fallback = FallbackSource.ERROR
         return RoutePlanResponse(
             status=RoutePlanStatus.RESOLVED if recommended else RoutePlanStatus.NO_ROUTE,
             readiness=RoutePlanReadiness.READY if recommended else RoutePlanReadiness.NO_ROUTE,
@@ -201,6 +218,10 @@ class CheongjuRoutePlanner:
             question=question,
             fallbackSource=fallback,
             rawProviderEvidence={
+                "searchedTransferCount": 1 if transfer_search is not None else 0,
+                "transferSameStopOnly": True if transfer_search is not None else None,
+                "transferSearchPartial": transfer_search.partial if transfer_search is not None else False,
+                "transferRouteLimitReached": transfer_search.limited if transfer_search is not None else False,
                 "routeSource": (
                     "TAGO"
                     if sequence_live and sequence_sources.intersection({"PUBLIC_API", "CACHE"})

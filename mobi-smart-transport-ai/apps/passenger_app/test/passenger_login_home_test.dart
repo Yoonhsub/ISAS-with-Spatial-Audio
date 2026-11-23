@@ -51,7 +51,7 @@ void main() {
     await tester
         .pumpWidget(MobiApp(firebaseConfigured: true, authSession: session));
     await tester.pumpAndSettle();
-    expect(find.text('MOBI 로그인'), findsOneWidget);
+    expect(find.text('MOBI_Finals_승객 로그인'), findsOneWidget);
     expect(find.text('노선 정보 검색'), findsNothing);
     expect(find.text('장애물 탐지'), findsNothing);
     session.failLogin = true;
@@ -80,7 +80,7 @@ void main() {
     session.failLogout = false;
     await tester.tap(find.text('로그아웃'));
     await tester.pumpAndSettle();
-    expect(find.text('MOBI 로그인'), findsOneWidget);
+    expect(find.text('MOBI_Finals_승객 로그인'), findsOneWidget);
     await tester.tap(find.text('로그인'));
     await tester.pumpAndSettle();
     expect(find.text('노선 정보 검색'), findsOneWidget);

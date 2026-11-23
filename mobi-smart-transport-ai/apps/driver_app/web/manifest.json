@@ -1,11 +1,11 @@
 {
-    "name": "mobi_driver_app",
-    "short_name": "mobi_driver_app",
+    "name": "MOBI_Finals 기사",
+    "short_name": "MOBI_Finals 기사",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#FFFFFF",
+    "theme_color": "#111111",
+    "description": "승객의 탑승 요청을 확인하고 승인하거나 거부하는 MOBI 기사 웹",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

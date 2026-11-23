@@ -95,10 +95,14 @@ class ContractServer {
     if (networkFailure) throw http.ClientException('offline network failure');
     if (failStatus != null) return http.Response('{}', failStatus!);
     if (caller == null || caller == 'invalid') return http.Response('{}', 401);
+    if (request.method == 'GET' && path == '/ride-requests') {
+      return http.Response(jsonEncode([if (record?['userId'] == caller) record]), 200);
+    }
     if (request.method == 'POST') {
       final draft = jsonDecode(request.body) as Map<String, dynamic>;
       if (draft['userId'] != caller) return http.Response('{}', 403);
       expect(request.headers['Idempotency-Key'], isNotEmpty);
+      if ({'DENIED', 'CANCELLED'}.contains(record?['status'])) record = null;
       record ??= {
         ...draft,
         'requestId': 'request-1',
@@ -133,7 +137,7 @@ class ContractServer {
         return http.Response('{}', 403);
       }
       final transitions = {
-        'WAITING': ['ACCEPTED', 'CANCELLED'],
+        'WAITING': ['ACCEPTED', 'DENIED', 'CANCELLED'],
         'ACCEPTED': ['ARRIVED', 'COMPLETED', 'CANCELLED'],
         'CANCELLED': <String>[]
       };
@@ -240,6 +244,30 @@ void main() {
     expect(server.patches, 2);
   });
 
+  for (final cancel in [false, true]) {
+    testWidgets('driver ${cancel ? "cancel accepted" : "deny"} removes active request and allows repeat', (tester) async {
+      await create(tester);
+      await tester.pumpWidget(const SizedBox());
+      session.switchTo('driver-a');
+      await showDriver(tester);
+      if (cancel) await click(tester, '요청 수락');
+      await click(tester, cancel ? '승인한 요청 취소' : '요청 거부');
+      final expected = cancel ? 'CANCELLED' : 'DENIED';
+      expect(server.record!['status'], expected);
+      expect(find.text(expected), findsNothing);
+      await click(tester, '이전 요청 기록');
+      expect(find.text(expected), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+      session.switchTo('passenger-a');
+      await showPassenger(tester);
+      expect(await RideCreationIntentStore().activeRequest('passenger-a'), isNull);
+      await click(tester, '탑승 요청하기');
+      expect(server.posts, 2);
+      expect(server.record!['status'], 'WAITING');
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   testWidgets('stale queued auth event cannot restore another account request',
       (tester) async {
     await create(tester);
@@ -248,7 +276,7 @@ void main() {
     session.events.add(const AuthAccount(uid: 'passenger-a'));
     await tester.pumpAndSettle();
     expect(find.textContaining('요청 ID:'), findsNothing);
-    expect(server.requests.where((r) => r.method == 'GET'), isEmpty);
+    expect(server.requests.where((r) => r.method == 'GET' && r.url.path != '/ride-requests'), isEmpty);
     session.switchTo('passenger-a');
     await tester.pumpAndSettle();
     expect(find.text('WAITING'), findsOneWidget);
@@ -317,7 +345,7 @@ void main() {
     session.switchTo('passenger-b');
     await tester.pumpAndSettle();
     expect(find.textContaining('요청 ID:'), findsNothing);
-    expect(server.requests.where((r) => r.method == 'GET'), isEmpty);
+    expect(server.requests.where((r) => r.method == 'GET' && r.url.path != '/ride-requests'), isEmpty);
     session.switchTo('passenger-a');
     await tester.pumpAndSettle();
     expect(find.text('WAITING'), findsOneWidget);
@@ -330,6 +358,8 @@ void main() {
     await showDriver(tester);
     server.record!['status'] = 'CANCELLED';
     await click(tester, '요청 수락');
+    expect(find.text('CANCELLED'), findsNothing);
+    await click(tester, '이전 요청 기록');
     expect(find.text('CANCELLED'), findsOneWidget);
     expect(find.textContaining('최신 목록'), findsWidgets);
     expect(server.patches, 1);
@@ -378,7 +408,9 @@ void main() {
     await click(tester, '내 탑승 요청 취소');
     await tester.pumpWidget(const SizedBox());
     await showPassenger(tester);
-    expect(find.text('CANCELLED'), findsOneWidget);
+    await click(tester, '이전 탑승 요청 기록');
+    expect(find.textContaining('CANCELLED'), findsOneWidget);
+    expect(find.text('요청 전'), findsOneWidget);
     expect(server.posts, 1);
   });
   testWidgets(

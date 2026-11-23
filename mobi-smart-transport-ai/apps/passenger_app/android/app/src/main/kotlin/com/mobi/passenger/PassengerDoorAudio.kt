@@ -52,7 +52,7 @@ internal class PassengerDoorAudio(context: Context, messenger: BinaryMessenger) 
                 if (call.method == "begin") {
                     stop()
                     owner = token
-                    signal = PassengerDoorSignal(photoDemo = call.argument<Boolean>("photoDemo") == true)
+                    signal = PassengerDoorSignal(photoDemo = call.argument<Boolean>("photoDemo") == true, visualOnly = call.argument<Boolean>("visualOnly") == true)
                     muted = false
                     retryAfter = 0L
                     sensors.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)?.let {

@@ -27,6 +27,7 @@ class LiveSpeechRecognizer {
 
   bool get isContinuous => true;
   bool get supported => _api?.supported() ?? false;
+  bool get isListening => (_api?.isRunning() ?? false) && !needsRecovery;
 
   String _wsUrl() {
     final loc = web.window.location;

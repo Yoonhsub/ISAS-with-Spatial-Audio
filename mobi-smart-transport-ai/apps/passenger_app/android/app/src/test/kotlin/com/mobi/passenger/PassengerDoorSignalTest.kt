@@ -4,6 +4,41 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PassengerDoorSignalTest {
+    @Test fun visualDoorReturnsToCenterAfterBothTurnsAndReacquisition() {
+        val signal = PassengerDoorSignal(visualOnly = true)
+        signal.heading(0.0, 1000, 1000)
+        signal.door(0.0, 1000, 1000)
+        assertEquals(0.0, signal.cue(1000)!!.angle!!, 0.001)
+        signal.heading(25.0, 1500, 1500)
+        signal.door(null, 1500, 1500)
+        assertEquals(-25.0, signal.cue(1500)!!.angle!!, 0.001)
+        signal.heading(-25.0, 2000, 2000)
+        assertEquals(25.0, signal.cue(2000)!!.angle!!, 0.001)
+        signal.heading(0.0, 2500, 2500)
+        signal.door(0.0, 2500, 2500)
+        assertEquals(0.0, signal.cue(2500)!!.angle!!, 0.001)
+        assertEquals(800, signal.cue(2500)!!.interval)
+        // Retaining the spoken class must not lengthen the native cue lifetime.
+        signal.heading(0.0, 6500, 6500)
+        assertNull(signal.cue(6500))
+        signal.door(0.0, 6501, 6501)
+        assertEquals(0.0, signal.cue(6501)!!.angle!!, 0.001)
+        assertEquals(ToneRenderMode.DOOR_DEMO_BINAURAL, selectToneRenderMode("passenger_door", 0.0))
+    }
+
+    @Test fun approvedVisualObjectUsesPhoneRotationWithoutBeacon() {
+        val signal = PassengerDoorSignal(visualOnly = true)
+        signal.heading(10.0, 1000, 1000)
+        signal.door(25.0, 1000, 1010)
+        assertEquals(25.0, signal.cue(1010)!!.angle!!, 0.01)
+        assertEquals(-1, signal.cue(1010)!!.beaconAge)
+        signal.heading(55.0, 1550, 1550)
+        assertEquals(-20.0, signal.cue(1550)!!.angle!!, 0.01)
+        assertNull(signal.cue(5000))
+        signal.clearDoor()
+        assertNull(signal.cue(5001))
+    }
+
     @Test fun photoUsesFreshCameraAndPhoneHeadingWithoutPretendingToReceiveBle() {
         val s = PassengerDoorSignal(photoDemo = true)
         assertNull(s.cue(1000))

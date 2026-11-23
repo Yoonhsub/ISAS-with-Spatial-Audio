@@ -19,6 +19,7 @@ class LocalVisionPage extends StatelessWidget {
       Stream<String?>? authChanges,
       String? remoteSessionId,
       bool bundledModel = false,
+      bool autoStart = false,
       SpeechPriorityCoordinator? previewPriority,
       SpatialVerificationEngine? previewEngine,
       String previewScope = 'camera-preview',

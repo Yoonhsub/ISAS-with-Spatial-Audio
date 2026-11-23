@@ -31,8 +31,7 @@ class LiveVoicePage extends StatefulWidget {
   final void Function(
     List<LiveCaptionLine> sessionLog, {
     required bool navigated,
-  })
-  onExit;
+  }) onExit;
 
   @override
   State<LiveVoicePage> createState() => _LiveVoicePageState();
@@ -106,96 +105,149 @@ class _LiveVoicePageState extends State<LiveVoicePage> {
       },
       child: Scaffold(
         backgroundColor: Colors.white,
-        body: Stack(
-          fit: StackFit.expand,
-          children: [
-            // 상단 Live 상태.
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: ValueListenableBuilder<VoiceTurnState>(
-                    valueListenable: _controller.state,
-                    builder: (context, state, _) => _TopStatus(state: state),
+        body: SafeArea(
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('음성으로 질문하기',
+                    style:
+                        TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+              ),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    children: [
+                      AnimatedBuilder(
+                        animation: Listenable.merge([
+                          _controller.state,
+                          _controller.microphoneActive,
+                          _controller.microphoneFinishing,
+                          _controller.microphoneUnavailable,
+                        ]),
+                        builder: (context, _) => LiveMicrophoneStatus(
+                          state: _controller.state.value,
+                          active: _controller.microphoneActive.value,
+                          finishing: _controller.microphoneFinishing.value,
+                          unavailable: _controller.microphoneUnavailable.value,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      LiveCaptionOverlay(
+                          controller: _captions, agentName: widget.agentName),
+                      const SizedBox(height: 16),
+                    ],
                   ),
                 ),
               ),
-            ),
-            // 자막(하단 컨트롤과 안 겹치게 padding).
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 120,
-              child: SafeArea(
-                top: false,
-                child: LiveCaptionOverlay(
-                  controller: _captions,
-                  agentName: widget.agentName,
-                ),
-              ),
-            ),
-            // 하단 컨트롤.
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 18),
-                  child: ValueListenableBuilder<VoiceTurnState>(
-                    valueListenable: _controller.state,
-                    builder: (context, state, _) => _BottomControls(
-                      immediateMic: state != VoiceTurnState.idle,
-                      onMicTap: () {
-                        DescribedAction.cancelDescriptions();
-                        _controller.handleMicTap();
-                      },
-                      onClose: () => _exit(navigated: false),
-                    ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
+                child: ValueListenableBuilder<VoiceTurnState>(
+                  valueListenable: _controller.state,
+                  builder: (context, state, _) => _BottomControls(
+                    blocked: state == VoiceTurnState.thinking,
+                    onMicTap: () {
+                      DescribedAction.cancelDescriptions();
+                      _controller.handleMicTap();
+                    },
+                    onClose: () => _exit(navigated: false),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-class _TopStatus extends StatelessWidget {
-  const _TopStatus({required this.state});
-
+/// Shows actual recognizer readiness, not merely the desired listening state.
+class LiveMicrophoneStatus extends StatelessWidget {
+  const LiveMicrophoneStatus(
+      {super.key,
+      required this.state,
+      required this.active,
+      this.finishing = false,
+      this.unavailable = false});
   final VoiceTurnState state;
+  final bool active;
+  final bool unavailable;
+  final bool finishing;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Icon(Icons.graphic_eq, color: Color(0xFF111111), size: 20),
-        const SizedBox(width: 8),
-        const Text(
-          'Live',
-          style: TextStyle(
-            color: Color(0xFF111111),
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
+    final listening = state == VoiceTurnState.listening && active;
+    final (title, message, icon) = switch (state) {
+      VoiceTurnState.thinking => (
+          '답변 준비 중',
+          '음성 입력이 잠시 멈춰 있습니다.',
+          Icons.hourglass_top_rounded
         ),
-        const SizedBox(width: 10),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-          decoration: BoxDecoration(
-            color: const Color(0xFF111111),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            state.statusLabel,
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-          ),
+      VoiceTurnState.speaking => (
+          '답변 읽는 중',
+          '다시 말씀하려면 아래 마이크 버튼을 눌러 주세요.',
+          Icons.volume_up_rounded
         ),
-      ],
+      _ when unavailable => (
+          '마이크 확인 필요',
+          '마이크 권한을 확인한 뒤 아래 버튼으로 다시 시작해 주세요.',
+          Icons.mic_off_rounded
+        ),
+      VoiceTurnState.listening when listening => (
+          '듣는 중',
+          '마이크가 켜져 있습니다. 지금 말씀해 주세요.',
+          Icons.mic_rounded
+        ),
+      VoiceTurnState.listening when finishing => (
+          '음성 확인 중',
+          '말씀하신 내용을 확인하고 있습니다.',
+          Icons.hourglass_top_rounded
+        ),
+      VoiceTurnState.listening => (
+          '마이크 연결 중',
+          '음성 입력을 준비하고 있습니다.',
+          Icons.mic_none_rounded
+        ),
+      VoiceTurnState.idle => (
+          '음성 입력 대기',
+          '다음 답변을 하려면 아래 마이크 버튼을 눌러 주세요.',
+          Icons.mic_off_rounded
+        ),
+    };
+    final foreground = listening ? Colors.white : const Color(0xFF111111);
+    return Semantics(
+      liveRegion: true,
+      label: '$title. $message',
+      excludeSemantics: true,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: listening ? const Color(0xFF111111) : Colors.white,
+          border: Border.all(color: const Color(0xFF111111), width: 3),
+          borderRadius: BorderRadius.circular(24),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: foreground, size: 48),
+            const SizedBox(height: 8),
+            Text(title,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: foreground,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(message,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: foreground, fontSize: 17, height: 1.4)),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -204,9 +256,9 @@ class _BottomControls extends StatelessWidget {
   const _BottomControls({
     required this.onMicTap,
     required this.onClose,
-    required this.immediateMic,
+    required this.blocked,
   });
-  final bool immediateMic;
+  final bool blocked;
 
   final VoidCallback onMicTap;
   final VoidCallback onClose;
@@ -217,7 +269,7 @@ class _BottomControls extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         const Text(
-          '에이전트에게 말을 걸려면 마이크 버튼을 눌러 주세요.',
+          '“○○ 가고싶은데 몇 번 버스 타?”라고 질문해 주세요.',
           style: TextStyle(color: Color(0xFF111111), fontSize: 12),
         ),
         const SizedBox(height: 10),
@@ -227,12 +279,12 @@ class _BottomControls extends StatelessWidget {
             DescribedAction(
               label: '음성 질문 시작',
               description: '마이크를 켜서 음성으로 질문합니다.',
-              immediate: immediateMic,
-              onActivate: onMicTap,
+              immediate: true,
+              onActivate: blocked ? null : onMicTap,
               child: _RoundButton(
                 icon: Icons.mic,
                 background: const Color(0xFF111111),
-                onTap: onMicTap,
+                onTap: blocked ? null : onMicTap,
               ),
             ),
             const SizedBox(width: 28),
@@ -259,13 +311,13 @@ class _RoundButton extends StatelessWidget {
 
   final IconData icon;
   final Color background;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final double size;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: background,
+      color: onTap == null ? const Color(0xFF767676) : background,
       shape: const CircleBorder(),
       clipBehavior: Clip.antiAlias,
       child: InkWell(

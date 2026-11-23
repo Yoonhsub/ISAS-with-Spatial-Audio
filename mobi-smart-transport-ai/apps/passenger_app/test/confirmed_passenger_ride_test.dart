@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mobi_mobile_auth/mobile_auth.dart';
@@ -18,7 +19,6 @@ import 'package:mobi_passenger_app/src/services/session_guidance_audio.dart';
 import 'package:mobi_passenger_app/src/services/shared_guidance_session.dart';
 import 'package:mobi_passenger_app/src/services/speech_priority_coordinator.dart';
 import 'package:mobi_passenger_app/src/services/v3_agent_api_client.dart';
-import 'package:mobi_passenger_app/src/widgets/chat_overlay.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mobi_passenger_app/src/services/ride_creation_intent.dart';
 
@@ -38,7 +38,24 @@ const plan = {
   ]
 };
 
+class RecordingSpeech extends SilentSpeech {
+  final messages = <String>[];
+  @override
+  Future<void> speak(String text) async { messages.add(text); }
+}
+
 class RideFixture {
+  RideFixture({this.routeNo = '711', this.transfer = false});
+  final String routeNo;
+  final bool transfer;
+  Map<String, dynamic> get routePlan => {
+    ...plan,
+    'segments': [
+      {...(plan['segments'] as List).first as Map<String, dynamic>, 'routeNo': routeNo},
+      if (transfer) {'routeId': 'CJB_SECOND', 'routeNo': '502',
+        'boardStop': {'stopId': 'other'}, 'alightStop': {'stopId': 'destination'}},
+    ],
+  };
   final auth = Session('owner');
   final shared = SharedGuidanceSession()..bind('owner');
   final commands = <String>[];
@@ -74,7 +91,8 @@ class RideFixture {
   Future<http.Response> handle(http.Request request) async {
     if (request.url.host != '127.0.0.1') throw StateError('Unexpected test host');
     http.Response json(Object data) =>
-        http.Response.bytes(utf8.encode(jsonEncode(data)), 200);
+        http.Response.bytes(utf8.encode(jsonEncode(data)), 200,
+            headers: {'content-type': 'application/json; charset=utf-8'});
     final path = request.url.path;
     switch (path) {
       case '/health':
@@ -87,22 +105,35 @@ class RideFixture {
         });
       case '/guidance/session':
         return json({'sessionId': 's', 'state': 'IDLE'});
+      case '/navigation/live-status':
+        expect(request.url.queryParameters.keys,
+            isNot(anyElement(isIn(['userLat', 'userLng', 'destLat', 'destLng']))));
+        return json({
+          'routeNo': routeNo,
+          'walkingRouteToBoardStop': {
+            'instructions': [{'description': '사거리에서 우회전하세요'}],
+            'distanceMeters': 300,
+            'durationSeconds': 240,
+          },
+          'arrivals': [{'routeNo': routeNo, 'arrivalMinutes': 5}],
+          'fallbackSource': 'PUBLIC_API',
+        });
       case '/agent/converse':
         final body = jsonDecode(request.body);
         if (body['sessionId'] != 's') throw StateError('Unexpected selection session');
         final text = body['utterance'] as String;
         commands.add(text);
-        if (text == '이걸로 안내해줘') guidanceState = 'WAITING_FOR_BUS';
+        if (text == '이걸로 안내해줘' || text == '$routeNo번 버스 탈게') guidanceState = 'WAITING_FOR_BUS';
         return json({
           'sessionId': 's',
           'state': guidanceState,
           'intent': guidanceState == 'WAITING_FOR_BUS'
               ? 'SELECT_ARRIVAL'
               : 'FIND_ROUTE',
-          'message': '711번 경로',
+          'message': '$routeNo번 버스를 타세요. 타실 버스를 “몇 번 버스 탈게”라고 말씀해 주세요.',
           'ttsMode': 'NONE',
           if (guidanceState == 'ROUTE_RECOMMENDED')
-            'routePlan': {'recommendedPlan': plan}
+            'routePlan': {'recommendedPlan': routePlan}
         });
       case '/guidance/state':
         if (request.url.queryParameters['sessionId'] != 's') throw StateError('Unexpected state session');
@@ -111,12 +142,13 @@ class RideFixture {
         return json({
           'sessionId': 's',
           'state': guidanceState,
-          'selectedPlan': plan,
+          'selectedPlan': routePlan,
           if (guidanceState == 'WAITING_FOR_BUS') 'selectedRouteId': 'CJB270009500',
-          'selectedRouteNo': '711',
+          'selectedRouteNo': routeNo,
           'selectedStopId': returnedStop
         });
       case '/ride-requests':
+        if (request.method == 'GET') return json([]);
         expect(request.method, 'POST');
         expect(request.headers['authorization'], 'Bearer owner');
         bodies.add(jsonDecode(request.body));
@@ -149,7 +181,7 @@ class RideFixture {
       uid: 'owner',
       wakeWord: '모비',
       mode: 'live',
-      expected: V3RoutePlanCandidate.fromJson(plan),
+      expected: V3RoutePlanCandidate.fromJson(routePlan),
       current: () => auth.currentAccount?.uid == 'owner');
 }
 
@@ -170,6 +202,8 @@ void audioChannels() {
   }
   messenger.setMockMethodCallHandler(
       const MethodChannel('flutter_tts'), (_) async => 1);
+  messenger.setMockMethodCallHandler(
+      const MethodChannel('mobi.passenger/accepted-door'), (_) async => null);
   messenger.setMockMethodCallHandler(
       const MethodChannel('xyz.luan/audioplayers'), (call) async {
     if (call.method == 'create') {
@@ -195,8 +229,8 @@ void main() {
   });
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
-  for (final chat in [true, false]) {
-    testWidgets('home 502 and ${chat ? "chat" : "button"} confirm server 711',
+  for (final spokenConsent in [true, false]) {
+    testWidgets('home 502 and ${spokenConsent ? "voice" : "button"} confirm server 711',
         (tester) async {
       audioChannels();
       tester.view.physicalSize = const Size(1080, 2200);
@@ -227,36 +261,26 @@ void main() {
               sharedSession: f.shared,
               localRuntime: runtime)));
       await frames(tester);
-      final open = find.text('채팅으로 질문하기');
+      expect(find.text('채팅으로 질문하기'), findsNothing);
+      expect(find.byType(TextField), findsNothing);
+      final open = find.text('음성으로 질문하기');
       await tester.ensureVisible(open);
-      await tester.tapAt(tester.getCenter(open));
+      await tester.tap(open);
       await tester.pump(const Duration(milliseconds: 80));
-      await tester.tapAt(tester.getCenter(open));
+      if (find.byType(LiveVoicePage).evaluate().isEmpty) await tester.tap(open);
       await frames(tester);
-      final overlay = tester.widget<ChatOverlay>(find.byType(ChatOverlay));
-      final input = find.descendant(
-          of: find.byType(ChatOverlay), matching: find.byType(TextField));
-      Future<void> waitForChat() async {
-        final chat = find.byType(ChatOverlay);
-        bool ready() {
-          final widget = tester.widget<ChatOverlay>(chat);
-          return !widget.isBusy && !widget.historyBusy;
-        }
-        for (var i = 0; i < 30 && !ready(); i++) {
-          await tester.pump(const Duration(seconds: 1));
-        }
-        expect(ready(), isTrue);
-      }
-      await tester.enterText(input, '711번');
-      await tester.testTextInput.receiveAction(TextInputAction.send);
+      final voice = tester.widget<LiveVoicePage>(find.byType(LiveVoicePage));
+      await voice.processor('711번');
       await frames(tester);
       expect(f.shared.rideSelection.value, isNull);
-      if (chat) {
-        await waitForChat();
-        await tester.enterText(input, '이 경로로 안내해줘');
-        await tester.testTextInput.receiveAction(TextInputAction.send);
+      if (spokenConsent) {
+        final result = await voice.processor('이 경로로 안내해줘');
+        expect(result.navigateNow, isTrue);
+        voice.onExit([], navigated: true);
+        nav.currentState!.pop();
       } else {
-        overlay.onClose();
+        voice.onExit([], navigated: false);
+        nav.currentState!.pop();
         await frames(tester);
         final start = find.text('이 경로로 안내 시작');
         await tester.ensureVisible(start);
@@ -275,6 +299,10 @@ void main() {
       }
       await frames(tester);
       expect(f.commands, ['711번', '이걸로 안내해줘']);
+      expect(find.text('선택한 버스와 환승 정보'), findsOneWidget);
+      expect(find.byType(FlutterMap), findsNothing);
+      expect(find.textContaining('사거리에서 우회전하세요'), findsNothing);
+      expect(find.textContaining('보행 경로'), findsNothing);
       nav.currentState!.pop();
       await frames(tester);
       expect(find.textContaining('502'), findsWidgets);
@@ -289,7 +317,7 @@ void main() {
           'stopId': 'CJB271000129'
         }
       ]);
-      final decision = chat ? 'ACCEPTED' : 'REJECTED';
+      final decision = spokenConsent ? 'ACCEPTED' : 'REJECTED';
       f.responseId = 'other-request';
       f.decision = decision;
       await tester.pump(const Duration(seconds: 5));
@@ -299,19 +327,20 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
       await frames(tester);
       expect(find.text(decision), findsOneWidget);
-      expect(find.text('요청 ID: ride-711'), findsOneWidget);
+      expect(find.text('요청 ID: ride-711'), spokenConsent ? findsOneWidget : findsNothing);
       expect(f.reads, List.filled(2, '/ride-requests/ride-711'));
-      await tester.pump(const Duration(seconds: 10));
-      expect(f.reads, hasLength(2));
+      await tester.pump(const Duration(seconds: 5));
+      await frames(tester);
+      expect(f.reads, hasLength(spokenConsent ? 3 : 2));
       nav.currentState!.push(MaterialPageRoute<void>(builder: (_) =>
           V3GuidancePage(agentName: '모비', dataMode: 'live', visionOnly: true,
             onReturnToModeSelection: () {}, localRuntime: runtime, sharedSession: f.shared)));
       await frames(tester);
       expect(f.reads.last, '/ride-requests/ride-711');
-      expect(find.text('안내 노선: 711번'), findsOneWidget);
-      expect(find.text('수락된 버스: 711번'), findsNothing);
+      expect(find.text('안내 노선: 711번'), findsNothing);
+      expect(find.text('수락된 버스: 711번'), spokenConsent ? findsOneWidget : findsNothing);
       expect(find.text('수락된 버스: 502번'), findsNothing);
-      if (chat) {
+      if (spokenConsent) {
         f.recordOwner = 'other-passenger';
         await tester.pump(const Duration(seconds: 5));
         await frames(tester);
@@ -322,10 +351,13 @@ void main() {
     });
   }
 
-  testWidgets('live voice confirmation remembers 711 in camera before a ride is sent', (tester) async {
+  for (final scenario in [('711', false), ('711-1', false), ('711', true)]) {
+  final (number, transfer) = scenario;
+  testWidgets('fixed voice $number transfer=$transfer confirmation creates a ride and camera waits for acceptance', (tester) async {
     audioChannels();
-    final f = RideFixture();
-    final priority = SpeechPriorityCoordinator(SilentSpeech());
+    final f = RideFixture(routeNo: number, transfer: transfer);
+    final speech = RecordingSpeech();
+    final priority = SpeechPriorityCoordinator(speech);
     final runtime = LocalGuidanceRuntime(
         client: f.guidance, rideApi: f.api, auth: f.auth,
         captureGuard: () => () => f.auth.currentAccount?.uid == 'owner',
@@ -341,26 +373,50 @@ void main() {
     await tester.ensureVisible(button);
     await tester.tap(button);
     await tester.pump(const Duration(milliseconds: 80));
-    await tester.tap(button);
+    if (find.byType(LiveVoicePage).evaluate().isEmpty) {
+      await tester.tap(button);
+    }
     await frames(tester);
     final voice = tester.widget<LiveVoicePage>(find.byType(LiveVoicePage));
     // Inject final STT transcripts at the same callback used by the microphone.
-    await voice.processor('711번');
-    final consent = await voice.processor('이 경로로 안내해줘');
-    expect(consent.navigateNow, isTrue);
+    final guidance = await voice.processor('$number번');
+    expect(guidance.spokenText, isNot(contains('타실 노선')));
+    await voice.speak(guidance.spokenText);
+    final spokenNumber = number.replaceAll('-', ' 다시 ');
+    expect(speech.messages.last, contains('$spokenNumber번 버스를 타세요.'));
+    final consent = await voice.processor('${number.replaceAll('-', ' 다시 ')}번 버스 탈게');
+    expect(consent.spokenText, contains('탑승 요청을 보냈습니다'));
+    expect(consent.navigateNow, isFalse);
+    expect(f.bodies, hasLength(1));
+    expect((f.bodies.single as Map)['busNo'], number);
+    expect((f.bodies.single as Map)['routeId'], 'CJB270009500');
+    expect((f.bodies.single as Map)['stopId'], 'CJB271000129');
+    final duplicate = await voice.processor('${number.replaceAll('-', ' 다시 ')}번 버스 탈게');
+    expect(duplicate.spokenText, contains('기존 탑승 요청'));
+    expect(f.bodies, hasLength(1));
     voice.onExit([], navigated: consent.navigateNow);
     nav.currentState!.pop();
     await frames(tester);
-    expect(f.commands, ['711번', '이걸로 안내해줘']);
-    expect(f.shared.rideSelection.value?.busNo, '711');
+    expect(f.commands, ['$number번', '$number번 버스 탈게']);
+    expect(f.shared.rideSelection.value?.busNo, number);
     nav.currentState!.push(MaterialPageRoute<void>(builder: (_) => page(true)));
     await frames(tester);
-    expect(find.text('안내 노선: 711번'), findsOneWidget);
-    expect(f.bodies, isEmpty);
-    expect(f.reads, isEmpty);
+    expect(find.text('안내 노선: $number번'), findsNothing);
+    expect(find.text('수락된 버스: $number번'), findsNothing);
+    expect(f.bodies, hasLength(1));
+    f.decision = 'ACCEPTED';
+    await tester.pump(const Duration(seconds: 5));
+    await frames(tester);
+    expect(find.text('수락된 버스: $number번'), findsOneWidget);
+    f.decision = 'CANCELLED';
+    await tester.pump(const Duration(seconds: 5));
+    await frames(tester);
+    expect(find.text('수락된 버스: $number번'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 4));
   });
+
+  }
 
   testWidgets('route panel shows a short status and tracks its hidden request ID',
       (tester) async {

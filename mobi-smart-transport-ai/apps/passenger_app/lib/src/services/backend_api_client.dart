@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'accepted_ride_beacon.dart';
+import '../models/v3_guidance_models.dart';
 
 import 'package:http/http.dart' as http;
 import 'package:mobi_mobile_auth/mobile_auth.dart';
@@ -67,6 +68,18 @@ class RideRequestStatusResult {
   final String description;
   final String semanticHint;
   final int? httpStatus;
+}
+
+class RideTransferResult {
+  const RideTransferResult({required this.message, this.request,
+    this.state, this.routePlan, this.httpStatus, this.errorCode});
+  final String message;
+  final Map<String, dynamic>? request;
+  final V3GuidanceState? state;
+  final V3RoutePlanResponse? routePlan;
+  final int? httpStatus;
+  final String? errorCode;
+  bool get isSuccess => request != null && state != null && routePlan != null;
 }
 
 class BackendApiClient {
@@ -288,6 +301,7 @@ class BackendApiClient {
     required RideRequestDraft draft,
     required String idempotencyKey,
     Future<void>? abortTrigger,
+    String? guidanceSessionId,
   }) async {
     if (useMockData) {
       await Future<void>.delayed(const Duration(milliseconds: 300));
@@ -308,7 +322,8 @@ class BackendApiClient {
             _buildUri('/ride-requests'),
             headers: {
               'Content-Type': 'application/json',
-              'Idempotency-Key': idempotencyKey
+              'Idempotency-Key': idempotencyKey,
+              if (guidanceSessionId != null) 'X-Guidance-Session': guidanceSessionId,
             },
             body: jsonEncode(draft.toJson()),
           )
@@ -374,6 +389,39 @@ class BackendApiClient {
         description: '탑승 요청 API에 연결할 수 없습니다.',
         semanticHint: '탑승 요청 생성 API 연결 실패 상태입니다.',
       );
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> fetchMyRideRequests() async {
+    final response = await _authClient.get(_buildUri('/ride-requests')).timeout(timeout);
+    if (response.statusCode != 200) throw StateError('요청 이력을 조회하지 못했습니다.');
+    return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<RideTransferResult> transferRideRequest({required String requestId,
+      required String busNo, required String sessionId}) async {
+    try {
+      final response = await _authClient.post(
+        _buildUri('/ride-requests/${Uri.encodeComponent(requestId)}/transfer'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'busNo': busNo, 'sessionId': sessionId}),
+      ).timeout(timeout);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode != 200) {
+        final detail = body['detail'];
+        return RideTransferResult(httpStatus: response.statusCode,
+          errorCode: detail is Map ? detail['code'] as String? : null,
+          message: detail is Map && detail['message'] is String
+            ? detail['message'] as String : '환승 요청을 확인하지 못했습니다. 같은 버스 번호로 다시 말씀해 주세요.');
+      }
+      return RideTransferResult(message: '환승 탑승 요청을 확인했습니다.',
+        request: Map<String, dynamic>.from(body['request'] as Map),
+        state: V3GuidanceState.fromJson(Map<String, dynamic>.from(body['guidanceState'] as Map)),
+        routePlan: V3RoutePlanResponse.fromJson(Map<String, dynamic>.from(body['routePlan'] as Map)));
+    } on AuthenticatedApiException catch (error) {
+      return RideTransferResult(message: error.userMessage, httpStatus: error.statusCode);
+    } catch (_) {
+      return const RideTransferResult(message: '환승 요청 결과를 확인하지 못했습니다. 같은 버스 번호로 다시 말씀해 주세요.');
     }
   }
 
@@ -443,7 +491,8 @@ class BackendApiClient {
         acceptedRide: AcceptedRide.read(decodedBody, requestId),
         description: switch (status) {
           'ACCEPTED' => '기사님이 탑승 요청을 수락했습니다.',
-          'REJECTED' => '기사님이 탑승 요청을 거절했습니다.',
+          'DENIED' || 'REJECTED' => '기사님이 탑승 요청을 거절했습니다.',
+          'CANCELLED' => '탑승 요청이 취소되었습니다. 새 요청을 보낼 수 있습니다.',
           _ => '탑승 요청 현재 상태는 $status 입니다.',
         },
         semanticHint: '탑승 요청 상태 조회 성공 상태입니다.',

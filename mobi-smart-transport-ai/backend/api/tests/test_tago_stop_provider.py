@@ -464,3 +464,24 @@ def test_http_failure_logs_status_not_upstream_payload(monkeypatch,caplog):
     assert result.fallbackSource==FallbackSource.ERROR
     assert 'status=503' in caplog.text and 'TAGO_STOP_HTTP_ERROR' in caplog.text
     assert 'test+key' not in caplog.text and len(calls)==1
+def test_interactive_search_timeout_is_scoped_and_keeps_camera_guard(monkeypatch):
+    from app.services import cheongju_bus_stops_service as stops
+    from app.services.cheongju_bus_stops_service import interactive_stop_lookup
+    from app.services.vision_binding_service import vision_binding_service
+    monkeypatch.setenv('CHEONGJU_BUS_STOPS_ENABLED', 'true')
+    monkeypatch.setenv('PUBLIC_DATA_API_KEY', 'test-key')
+    calls = []
+    def respond(request):
+        calls.append(request.extensions['timeout']['read'])
+        return httpx.Response(200, json={'response': {'header': {'resultCode':'00'},
+            'body': {'totalCount':0, 'pageNo':1, 'items': {'item':[]}}}})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        service = stops.TagoBusStopsService(client=transport)
+        with interactive_stop_lookup():
+            service.search_by_name(stop_name='병원')
+        service.search_by_name(stop_name='병원')
+        assert calls == [6.0, 2.0]
+        monkeypatch.setattr(vision_binding_service, 'has_camera_reservation', lambda: True)
+        with interactive_stop_lookup(), pytest.raises(stops.StopLookupError, match='CACHE_NOT_READY'):
+            service.search_by_name(stop_name='병원')
+        assert calls == [6.0, 2.0]

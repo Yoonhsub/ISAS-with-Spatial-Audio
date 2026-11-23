@@ -557,6 +557,20 @@ def _run_converse(
     utterance = normalized.cleaned_utterance or payload.utterance.strip()
     live = _resolve_live(payload.mode)
 
+    from app.services.demo_conversation import converse as demo_converse
+    demo = demo_converse(session, payload, live, utterance)
+    if demo is not None:
+        message, plan, selected = demo
+        if plan is not None and plan.recommendedPlan is not None:
+            _apply_route_plan(session, plan)
+        if selected:
+            session.state = GuidanceState.WAITING_FOR_BUS
+        return _agent_response(trace=trace, session=session, utterance=utterance,
+            intent=AgentIntent.SELECT_ARRIVAL if selected else AgentIntent.FIND_ROUTE,
+            message=message, tts_mode=TtsMode.LOCAL_TTS, cue=V3Cue(), used_gemini=False,
+            fallback_source=plan.fallbackSource if plan else FallbackSource.PUBLIC_API if live else FallbackSource.MOCK,
+            route_plan=plan)
+
     # 목적지 후보 확인/선택 질문이 걸린 상태에서는 "응 맞아", "두 번째" 같은 후속 발화를
     # 먼저 소비한다. Flash/Gemini가 이 짧은 답변을 잡담으로 오분류하는 것을 막기 위함이다.
     if session.pending_resolution_status and _is_explicit_new_route_request(utterance, wake_word):

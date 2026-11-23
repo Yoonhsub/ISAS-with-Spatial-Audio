@@ -27,10 +27,11 @@ class RideRequestService:
 
     ROOT_PATH = "/rideRequests"
     ALLOWED_TRANSITIONS: dict[RideRequestStatus, set[RideRequestStatus]] = {
-        RideRequestStatus.WAITING: {RideRequestStatus.ACCEPTED, RideRequestStatus.CANCELLED},
-        RideRequestStatus.NOTIFIED: {RideRequestStatus.ACCEPTED, RideRequestStatus.CANCELLED},
+        RideRequestStatus.WAITING: {RideRequestStatus.ACCEPTED, RideRequestStatus.DENIED, RideRequestStatus.CANCELLED},
+        RideRequestStatus.NOTIFIED: {RideRequestStatus.ACCEPTED, RideRequestStatus.DENIED, RideRequestStatus.CANCELLED},
         RideRequestStatus.ACCEPTED: {RideRequestStatus.ARRIVED, RideRequestStatus.COMPLETED, RideRequestStatus.CANCELLED},
         RideRequestStatus.ARRIVED: {RideRequestStatus.COMPLETED, RideRequestStatus.CANCELLED},
+        RideRequestStatus.DENIED: set(),
         RideRequestStatus.COMPLETED: set(),
         RideRequestStatus.CANCELLED: set(),
     }
@@ -41,7 +42,7 @@ class RideRequestService:
         self._created_at_lock = Lock()
         self._last_created_at: datetime | None = None
 
-    def create(self, payload: RideRequestCreate, idempotency_key: str | None = None) -> RideRequestRecord:
+    def create(self, payload: RideRequestCreate, idempotency_key: str | None = None, *, journey: dict | None = None) -> RideRequestRecord:
         principal = require_role("passenger")
         from app.cloud_test import requested, validate
         if requested():
@@ -54,7 +55,7 @@ class RideRequestService:
                 or idempotency_key != scope.idempotency_key):
             raise auth_error(403, 'Creation is outside the approved ride-only action')
         if idempotency_key is not None:
-            return self._create_idempotent(payload, idempotency_key, principal)
+            return self._create_idempotent(payload, idempotency_key, principal, journey=journey)
         payload = self._resolve_assignment(payload, principal)
         now = self._next_created_at()
         request_id = self._new_request_id()
@@ -71,6 +72,7 @@ class RideRequestService:
                 "status": status.value,
                 "createdAt": self._serialize_datetime(now),
                 "updatedAt": None,
+                **({'_journey': journey} if journey is not None else {}),
             },
         )
 
@@ -114,14 +116,34 @@ class RideRequestService:
             payload = payload.model_copy(update={"targetDriverId": assignment.get("driverId")})
             if not valid_key(payload.targetDriverId):
                 raise HTTPException(409, "Invalid local demo assignment")
+        if not payload.targetDriverId and principal.role != "admin":
+            drivers = self.firebase.get("/drivers") or {}
+            eligible = {key: driver for key, driver in drivers.items()
+                        if valid_key(key) and self._driver_accepts(driver, payload)}
+            exact = [key for key, driver in eligible.items()
+                     if driver.get("routeId") == payload.routeId
+                     and driver.get("busNo") == payload.busNo]
+            matches = exact or [key for key, driver in eligible.items()
+                                if driver.get("acceptsSelectedRoutes") is True]
+            if len(matches) != 1:
+                raise HTTPException(409, "A unique active driver must be assigned to this route")
+            payload = payload.model_copy(update={"targetDriverId": matches[0]})
         if payload.targetDriverId:
             if not valid_key(payload.targetDriverId):
                 raise auth_error(403, "Invalid driver assignment")
             if principal.role != "admin":
                 driver = self.firebase.get(f"/drivers/{payload.targetDriverId}")
-                if not isinstance(driver, dict) or driver.get("routeId") != payload.routeId or driver.get("busNo") != payload.busNo:
+                if not self._driver_accepts(driver, payload):
                     raise auth_error(403, "Driver is not assigned to this route and bus")
         return payload
+
+    @staticmethod
+    def _driver_accepts(driver: Any, payload: RideRequestCreate) -> bool:
+        if not isinstance(driver, dict) or driver.get("active", True) is not True:
+            return False
+        return driver.get("acceptsSelectedRoutes") is True or (
+            driver.get("routeId") == payload.routeId and driver.get("busNo") == payload.busNo
+        )
 
     def _send_creation_notification(self, request_id: str, payload: RideRequestCreate, principal: Principal) -> bool:
         if payload.targetDriverId:
@@ -163,7 +185,7 @@ class RideRequestService:
         if metadata.get("uid") != principal.uid or metadata.get("fingerprint") != fingerprint:
             raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT: use a new key only for a new action")
 
-    def _create_idempotent(self, payload: RideRequestCreate, key: str, principal: Principal) -> RideRequestRecord:
+    def _create_idempotent(self, payload: RideRequestCreate, key: str, principal: Principal, *, journey: dict | None = None) -> RideRequestRecord:
         request_id, fingerprint = self._creation_identity(principal.uid, key, payload)
         path = self._record_path(request_id)
         existing = self.firebase.get(path)
@@ -174,6 +196,7 @@ class RideRequestService:
             candidate = {
                 **assigned.model_dump(mode="json"), "status": RideRequestStatus.WAITING.value,
                 "createdAt": self._serialize_datetime(self._next_created_at()), "updatedAt": None,
+                **({'_journey': journey} if journey is not None else {}),
                 "_creation": {"version": 1, "uid": principal.uid, "fingerprint": fingerprint,
                               "notification": {"state": "pending" if assigned.targetDriverId else "not_required"}},
             }
@@ -316,6 +339,15 @@ class RideRequestService:
         records.sort(key=lambda item: item.createdAt, reverse=True)
         return DriverRideRequestsResponse(driverId=driver_id, requests=records)
 
+    def list_for_passenger(self) -> list[RideRequestRecord]:
+        principal = require_role("passenger")
+        records = []
+        for request_id, raw in (self.firebase.get(self.ROOT_PATH) or {}).items():
+            if not isinstance(raw, dict) or raw.get("userId") != principal.uid:
+                continue
+            records.append(self._authorized_record(request_id, raw, principal))
+        return sorted(records, key=lambda r: r.createdAt, reverse=True)
+
     @classmethod
     def _record_path(cls, request_id: str) -> str:
         return f"{cls.ROOT_PATH}/{request_id}"
@@ -348,5 +380,5 @@ class RideRequestService:
     @staticmethod
     def _record_from_raw(request_id: str, raw: dict[str, Any]) -> RideRequestRecord:
         # Internal creation metadata never changes the public strict response schema.
-        raw = {key: value for key, value in raw.items() if key not in {"requestId", "_creation"}}
+        raw = {key: value for key, value in raw.items() if key not in {"requestId", "_creation", "_journey", "_transfer"}}
         return RideRequestRecord.model_validate({"requestId": request_id, **raw})

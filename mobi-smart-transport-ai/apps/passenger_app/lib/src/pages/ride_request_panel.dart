@@ -6,6 +6,9 @@ import 'package:mobi_mobile_auth/mobile_auth.dart';
 import '../services/backend_api_client.dart';
 import '../services/confirmed_ride_selection.dart';
 import '../services/ride_creation_intent.dart';
+import '../services/ride_acceptance_announcement.dart';
+import '../widgets/described_action.dart';
+import '../services/speech_priority_coordinator.dart';
 
 /// The business ride UI uses the existing HTTP contract, never direct RTDB.
 class RideRequestPanel extends StatefulWidget {
@@ -70,11 +73,15 @@ class _RideRequestPanelState extends State<RideRequestPanel>
   int _readGeneration = 0;
   String? _uid;
   String? _requestId;
+  List<Map<String, dynamic>> _history = [];
+  static const _terminal = {'DENIED', 'REJECTED', 'CANCELLED', 'COMPLETED'};
   String _status = '요청 전';
   String _message = '버스를 선택한 뒤 탑승 요청을 보내세요.';
   String? _actionIssue;
   bool _busy = false;
   int _epoch = 0;
+  final _announcementOwner = Object();
+  SpeechPriorityCoordinator? _announcementSpeech;
 
   @override
   void initState() {
@@ -93,6 +100,7 @@ class _RideRequestPanelState extends State<RideRequestPanel>
         _epoch++;
         _uid = account?.uid;
         _requestId = null;
+        _history = [];
         _status = '요청 전';
         _actionIssue = null;
         _message = '현재 계정의 탑승 요청을 확인해 주세요.';
@@ -106,6 +114,7 @@ class _RideRequestPanelState extends State<RideRequestPanel>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _announcementSpeech = ActionSpeechScope.of(context);
     final visible = ModalRoute.isCurrentOf(context) ?? true;
     if (visible == _visible) return;
     _visible = visible;
@@ -138,7 +147,18 @@ class _RideRequestPanelState extends State<RideRequestPanel>
     final epoch = ++_epoch;
     setState(() => _busy = true);
     try {
-      final id = await _store.activeRequest(uid);
+      var id = await _store.activeRequest(uid);
+      if (!_current(epoch, uid)) return;
+      try {
+        final records = await widget.api.fetchMyRideRequests();
+        if (!_current(epoch, uid)) return;
+        _history = records.where((r) => _terminal.contains(r['status'])).toList();
+        final active = records.where((r) => !_terminal.contains(r['status']));
+        if (active.isNotEmpty) {
+          id = active.first['requestId'] as String;
+          await _store.rememberRequest(uid, id);
+        }
+      } catch (_) { /* Existing request can still be recovered by its ID. */ }
       if (!_current(epoch, uid) || id == null) return;
       _requestId = id;
       if (!_visible || !_foreground) return;
@@ -171,6 +191,7 @@ class _RideRequestPanelState extends State<RideRequestPanel>
   }
 
   void _stopReading() {
+    _stopAnnouncement();
     _readGeneration++;
     _poll?.cancel();
     _poll = null;
@@ -184,7 +205,7 @@ class _RideRequestPanelState extends State<RideRequestPanel>
         !_foreground ||
         !widget.autoRefresh ||
         _requestId == null ||
-        {'ACCEPTED', 'REJECTED', 'CANCELLED', 'COMPLETED'}.contains(_status)) {
+        {'DENIED', 'REJECTED', 'CANCELLED', 'COMPLETED'}.contains(_status)) {
       return;
     }
     _poll = Timer(const Duration(seconds: 5), () {
@@ -197,6 +218,13 @@ class _RideRequestPanelState extends State<RideRequestPanel>
   }
 
   void _show(RideRequestStatusResult result) {
+    final id = _requestId, uid = _uid;
+    if (result.isSuccess && _terminal.contains(result.statusLabel) && id != null && uid != null) {
+      unawaited(_store.clearActive(uid, id).catchError((Object _) {}));
+      _history.removeWhere((r) => r['requestId'] == id);
+      _history.insert(0, {'requestId': id, 'status': result.statusLabel});
+      _requestId = null;
+    }
     setState(() {
       if (result.isSuccess || result.httpStatus == 409) {
         _status = result.statusLabel;
@@ -204,6 +232,27 @@ class _RideRequestPanelState extends State<RideRequestPanel>
       _actionIssue = result.isSuccess ? null : result.statusLabel;
       _message = result.description;
     });
+    final accepted = result.acceptedRide;
+    final speech = _announcementSpeech;
+    if (result.isSuccess && accepted != null && accepted.userId == uid &&
+        accepted.requestId == id && speech != null && uid != null && id != null) {
+      final generation = _readGeneration;
+      unawaited(RideAcceptanceAnnouncement.announce(uid: uid, requestId: id,
+          speech: speech, owner: _announcementOwner,
+          current: () => mounted && _visible && _foreground &&
+              generation == _readGeneration && _uid == uid &&
+              _auth.currentAccount?.uid == uid && _requestId == id &&
+              _status == 'ACCEPTED' && _actionIssue == null));
+    } else {
+      _stopAnnouncement();
+    }
+  }
+
+  void _stopAnnouncement() {
+    final speech = _announcementSpeech;
+    if (speech != null) {
+      unawaited(speech.stopObservation(_announcementOwner).catchError((Object _) {}));
+    }
   }
 
   Future<void> _create() async {
@@ -229,6 +278,7 @@ class _RideRequestPanelState extends State<RideRequestPanel>
       final result = await widget.api.createRideRequest(
           draft: draft,
           idempotencyKey: key,
+          guidanceSessionId: sessionId,
           abortTrigger: widget.selectionRevoked);
       if (!_current(epoch, uid)) return;
       setState(() {
@@ -321,12 +371,12 @@ class _RideRequestPanelState extends State<RideRequestPanel>
 
   @override
   Widget build(BuildContext context) {
-    final terminal = {'REJECTED', 'CANCELLED', 'COMPLETED'}.contains(_status);
+    final terminal = {'DENIED', 'REJECTED', 'CANCELLED', 'COMPLETED'}.contains(_status);
     final displayStatus = widget.compact
         ? switch (_status) {
             'WAITING' => '수락 대기',
             'ACCEPTED' => '수락됨',
-            'REJECTED' => '거절됨',
+            'DENIED' || 'REJECTED' => '거절됨',
             'CANCELLED' => '취소됨',
             'COMPLETED' => '탑승 완료',
             _ => _status,
@@ -340,6 +390,12 @@ class _RideRequestPanelState extends State<RideRequestPanel>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    Material(color: Colors.transparent, child: ExpansionTile(title: const Text('이전 탑승 요청 기록'), children: [
+                      if (_history.isEmpty) const ListTile(title: Text('이전 요청 없음')),
+                      for (final record in _history)
+                        ListTile(title: Text('${record['busNo'] ?? ''} ${record['status']}'),
+                          subtitle: Text('${record['requestId']}')),
+                    ])),
                     if (widget.compact) ...[
                       Wrap(
                           spacing: 8,

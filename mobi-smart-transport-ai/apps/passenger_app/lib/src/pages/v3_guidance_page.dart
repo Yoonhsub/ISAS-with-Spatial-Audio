@@ -854,8 +854,16 @@ class _V3GuidancePageState extends State<V3GuidancePage>
   }
 
   Future<void> _toggleVoiceInput() async {
-    if (_isBusy) return;
+    if (_isBusy || !_speechAuthValid) return;
     if (_isLiveMode) {
+      if (_sessionId.isEmpty || !_sharedSessionCurrent) {
+        await _bootstrap();
+        if (!mounted || !_speechAuthValid) return;
+        if (_sessionId.isEmpty || !_sharedSessionCurrent) {
+          setState(() => _voiceStatusMessage = _voiceReconnectMessage);
+          return;
+        }
+      }
       // 실제 API 모드: 수동 녹음 UI 대신 전체 화면 Live 음성 대화로 진입한다.
       await _openLiveVoice();
       return;
@@ -913,6 +921,10 @@ class _V3GuidancePageState extends State<V3GuidancePage>
 
   /// 전체 화면 Live 음성 대화 페이지를 연다(실제 API 모드 전용).
   Future<void> _openLiveVoice() async {
+    final session = _sessionId;
+    final authCurrent = _captureAuthGuard();
+    bool current() => mounted && _speechAuthValid && authCurrent() &&
+        _sharedSessionCurrent && session.isNotEmpty && _sessionId == session;
     if (!_androidAudio) unawaited(_cueService.prepareLiveGeneratedSpeech());
     // 공간음향 AudioContext는 첫 사용자 제스처(웹 JS unlock)에서 생성·resume한다.
     // iOS는 제스처 이전에 만든 컨텍스트를 못 쓰게 하므로 사전 prepare()를 호출하지 않는다.
@@ -924,25 +936,35 @@ class _V3GuidancePageState extends State<V3GuidancePage>
             speech: _priority,
             child: LiveVoicePage(
               agentName: _wakeWord,
-              processor: _processLiveUtterance,
+              processor: (text, {onThought}) =>
+                  _processLiveUtterance(text, current: current, onThought: onThought),
               speak: _speakLiveOnly,
               stopAudio: _stopAllCueAudio,
-              onExit: _onLiveVoiceExit,
+              onExit: (log, {required navigated}) {
+                if (current()) _onLiveVoiceExit(log, navigated: navigated);
+              },
             )),
       ),
     );
-    if (!mounted) return;
+    if (!current()) return;
     await _activatePendingNavPlanAfterLiveExit();
   }
+
+  static const _voiceReconnectMessage =
+      '안내 세션에 연결할 수 없습니다. 노선 정보 검색 화면에서 서버 다시 연결을 눌러 주세요.';
+  static const _voiceReconnectResult = LiveProcessResult(spokenText: _voiceReconnectMessage);
 
   /// Live 음성 발화 1턴 처리: 길안내 동의 → 네비 전환, 그 외 → 에이전트 응답.
   Future<LiveProcessResult> _processLiveUtterance(
     String utterance, {
+    required bool Function() current,
     void Function(String thought)? onThought,
   }) async {
+    if (!current()) return _voiceReconnectResult;
     final text = utterance.trim();
     if (text.isEmpty) return const LiveProcessResult(spokenText: '');
     final fixedMockResponse = await _fixedMockLiveResponse(text);
+    if (!current()) return _voiceReconnectResult;
     if (fixedMockResponse != null) return fixedMockResponse;
 
     // 경로를 찾은 뒤 안내 시작 여부에 대한 응답을 먼저 해석한다.
@@ -969,12 +991,15 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     _absorbWatchedPosition();
     final originPosition = preparation?.position ?? _cachedPosition;
     try {
+      if (!current()) return _voiceReconnectResult;
       final response = await _converseWithThoughts(
         text: text,
         originLat: originPosition?.latitude,
         originLng: originPosition?.longitude,
         onThought: onThought ?? (_) {},
+        current: current,
       );
+      if (!current()) return _voiceReconnectResult;
       // 종료 의사는 백엔드 Gemini가 자연어로 판별(END_CONVERSATION).
       if (response.intent == 'END_CONVERSATION') {
         return LiveProcessResult(
@@ -983,6 +1008,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
         );
       }
       final state = await _client.fetchState(sessionId: _sessionId);
+      if (!current()) return _voiceReconnectResult;
       final routePlan = response.routePlan;
       final hasNavPlan = routePlan?.recommendedPlan != null;
       if (mounted) {
@@ -1011,6 +1037,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
       }
       return LiveProcessResult(spokenText: response.message);
     } on V3ApiException catch (error) {
+      if (!current()) return _voiceReconnectResult;
       await _handleSessionError(error);
       return LiveProcessResult(spokenText: error.toString());
     } catch (_) {
@@ -1377,6 +1404,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     required double? originLat,
     required double? originLng,
     required void Function(String thought) onThought,
+    bool Function()? current,
   }) async {
     try {
       V3AgentResponse? finalResponse;
@@ -1402,6 +1430,7 @@ class _V3GuidancePageState extends State<V3GuidancePage>
     } catch (_) {
       // 스트리밍 미지원/실패 → 일반 REST converse로 폴백.
     }
+    if (current?.call() == false) throw const V3ApiException(_voiceReconnectMessage);
     return _client.converse(
       sessionId: _sessionId,
       wakeWord: _wakeWord,
